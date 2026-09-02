@@ -34,7 +34,7 @@ Target: one EC2 instance in **eu-west-1 (Ireland)**, Caddy for automatic HTTPS, 
 ANTHROPIC_API_KEY=sk-ant-... ANTHROPIC_WORKSPACE_ID=wrkspc_... ACCESS_CODE=choose-a-code ./infra/scripts/secrets.sh
 ```
 
-`ANTHROPIC_WORKSPACE_ID` is mandatory for identity-linked keys (the API returns "anthropic-workspace-id is required" without it) and is found in the Anthropic Console under Settings → Workspaces. The SDK reads it from the environment automatically.
+`ANTHROPIC_WORKSPACE_ID` is mandatory for identity-linked keys (the API returns "anthropic-workspace-id is required" without it) and is found in the Anthropic Console under Settings → Workspaces (it starts with `wrkspc_`). The app sends it as the `anthropic-workspace-id` header on every request (`app/src/lib/ai/client.ts`); the SDK does not add it on its own for API-key auth.
 
 This writes `/masdr-proto/ANTHROPIC_API_KEY` and `/masdr-proto/ACCESS_CODE` to SSM Parameter Store as SecureStrings (encrypted with the AWS-managed `aws/ssm` KMS key). The instance role may read only `/masdr-proto/*`. At boot and on every deploy, `masdr-env` on the instance pulls them into `/etc/masdr/env` (root-owned, mode 640, group `masdr`) and systemd injects that file into the app process. To rotate: run the script again, then `masdr-deploy` (or `masdr-env && systemctl restart masdr`) via SSM.
 
@@ -87,7 +87,20 @@ Smoke test in the browser: open the link, enter the access code, click "Use the 
 
 No Docker, no SSH, no downtime beyond the ~3 s service restart.
 
-## 7. Operations notes
+## 7. Current deployment (2026-09-03)
+
+| Item | Value |
+|------|-------|
+| Region / profile | eu-west-1 / `gentek-deploy` |
+| Elastic IP | 52.49.56.114 (A record `masdr-proto` at GoDaddy, added 2026-09-02) |
+| Instance | i-0a91558255966e35d (t3.small, Ubuntu 24.04) |
+| Bucket | masdr-proto-data-321407928371 |
+| Secrets | `/masdr-proto/ANTHROPIC_API_KEY`, `/masdr-proto/ANTHROPIC_WORKSPACE_ID`, `/masdr-proto/ACCESS_CODE` |
+| URL | https://masdr-proto.thegentek.com (Let's Encrypt certificate issued by Caddy) |
+
+First-boot lessons folded back into `cloud-init.yaml`: the Caddy package did not create its service user, so the runcmd now creates it before restarting Caddy; and the instance environment script must be refreshed (`masdr-env`) whenever a new variable such as the workspace ID is introduced.
+
+## 8. Operations notes
 
 - **Instance size:** t3.small (2 vCPU, 2 GB). Chromium PDF rendering peaks ~400 MB; generation is I/O-bound on the Anthropic API. Move to t3.medium if more than ~5 concurrent generations are expected.
 - **Data:** SQLite + uploads + exports under `/var/lib/masdr/data` on the encrypted root volume. Snapshot the volume before destructive changes; a nightly `aws s3 sync /var/lib/masdr/data s3://<bucket>/backup/` cron can be added if the prototype outlives the demo.
