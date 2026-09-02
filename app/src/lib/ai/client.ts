@@ -18,7 +18,13 @@ const PRICING: Record<string, { input: number; output: number; cacheRead: number
 let client: Anthropic | null = null;
 export function getClient(): Anthropic {
   if (!client) {
-    client = new Anthropic({ timeout: 10 * 60 * 1000, maxRetries: 3 });
+    // Identity-linked API keys must send the workspace they act in on every request.
+    const workspace = process.env.ANTHROPIC_WORKSPACE_ID?.trim();
+    client = new Anthropic({
+      timeout: 10 * 60 * 1000,
+      maxRetries: 3,
+      defaultHeaders: workspace ? { "anthropic-workspace-id": workspace } : undefined,
+    });
   }
   return client;
 }
