@@ -1,0 +1,529 @@
+[
+ {
+  "name": "Masdr Tech Pack (AI Tech Pack Generator, factory-first edition)",
+  "summary": "A single Next.js 16 (App Router, Node 22, pnpm) service that turns one product photo/sketch plus a short brief into a versioned, bilingual, factory-ready tech pack. The pipeline is prompt-chaining with code gates: claude-opus-5 reads the image into a structured VisionObservation, code routes to a product template (bucket_hat now, generic fallback), claude-opus-5 writes a base-size-M TechPackDraft against a cached rulebook, and then CODE (not the model) grades S/M/L from head circumference, computes tip diameter/brim circumference/pattern-piece cut dimensions/fabric consumption per colour, draws dimension-true SVG flats whose POM callouts are bound to the numbers, validates geometry and BOM completeness, and scores factory readiness. claude-sonnet-5 plays the Egyptian factory production manager (critique) and the draft is repaired at most twice. Every number carries provenance (measured / stated / derived / default / inferred) and confidence, and the formula is printed beside every derived value. The document is ordered the way an Egyptian merchandiser and sample room actually consume it: cover -> flats with numbered callouts -> graded POM chart -> cut sheet -> BOM -> numbered operation sheet -> colorway matrix -> labels/packaging (ES 7266 Arabic label block) -> QC/AQL -> factory acknowledgement -> assumptions and questions -> revision log. English is primary with an Arabic gloss on every heading, POM, BOM line and operation; a separate Arabic-first 'sample room sheet' (cut sheet + operation sheet + POM chart only) prints for cutters and sewers. Exports are PDF (Playwright/Chromium rendering the same HTML as the web view, so Arabic shaping and SVG match), XLSX (ExcelJS with live grading formulas and a factory-comment column) and JSON. The acknowledgement/revision loop (factory acknowledges sample size, units, tolerances, thread and fabric availability; sample comments append to a sample-review table and bump v1.x) is persisted in SQLite with immutable per-version copies. Hosted on one EC2 instance behind Caddy at https://masdr-proto.thegentek.com, Terraform-managed, deployed by zip -> S3 -> SSM RunCommand (no Docker, no SSH).",
+  "stack": [
+   "Node.js 22 LTS + pnpm 10 (existing scaffold at /home/doct0rx/gentek/masdrmena/prototype/app)",
+   "Next.js 16.3.4 App Router, output: 'standalone', React 19.2, Tailwind 4 (Masdr palette: #251670/#5F50BC/#362E83, cream #F8F6F1; fonts Inter + Cairo for Arabic + Geist Mono for spec numbers)",
+   "@anthropic-ai/sdk 0.123.0 with zodOutputFormat (structured outputs via output_config.format), messages.stream().finalMessage(), thinking {type:'adaptive'}, prompt caching (cache_control on the rulebook system block), server-side refusal fallbacks (betas:['server-side-fallback-2026-07-01'], fallbacks:'default') on claude-opus-5 calls, plus the existing manual claude-sonnet-5 retry as a second safety net",
+   "Models: claude-opus-5 (vision, draft, repair), claude-sonnet-5 (detail-zoom confirm, critique, Arabic comment translation, full fallback); claude-fable-5-1 reserved for an A/B via ANTHROPIC_MODEL_PRIMARY only (2x price, slower, forced tool_choice rejected)",
+   "zod 4 for both LLM output schemas (src/lib/ai/llm-schemas.ts, enums only, no min/max, no records) and the final TechPack schema (src/lib/techpack/schema.ts)",
+   "sharp 0.34 for image normalisation (EXIF rotate, flatten, <=1568 px long edge, JPEG q90) and full-resolution detail crops",
+   "node:sqlite (DatabaseSync, WAL) as the only database: jobs, packs, pack_versions, sample_reviews, acknowledgements, exports cache; files under DATA_DIR (uploads/, exports/), synced hourly to S3",
+   "In-process bounded job queue (JOB_CONCURRENCY=3) + globalThis event bus + Server-Sent Events route /api/jobs/[id]/events with history replay and 15 s heartbeats",
+   "Parametric SVG flats generated in code (src/lib/flats/bucket_hat.ts, viewBox in mm, <g id='pom-X'> anchors bound to POM values)",
+   "Playwright 1.62.1 + bundled Chromium for PDF (renders /packs/[id]/print?lang=en|ar, A4 landscape, preferCSSPageSize, footer with version/date; fonts embedded locally via @font-face, never fetched at render time)",
+   "ExcelJS 4.4 for XLSX (sheets Cover, Flats, POM_Spec with formulas, Cut_Sheet, BOM, Construction, Colorways, Labels_Packaging, QC, Acknowledgement, Revision_Log; rightToLeft view only when ?lang=ar)",
+   "vitest 3 for the geometry, validator, consumption and schema-stability tests; a 15-30 item eval set under /prototype/docs/eval for effort sweeps",
+   "Caddy 2 (automatic Let's Encrypt/ZeroSSL TLS, request_body max_size 20MB, reverse_proxy 127.0.0.1:3000, optional basic_auth in front of the app's own ACCESS_CODE gate)",
+   "AWS: EC2 t3.small (x86_64 so the WSL2-built standalone bundle and sharp binaries match the target; t4g.small only if you switch to building on the box), Ubuntu 24.04, Elastic IP, instance profile (AmazonSSMManagedInstanceCore + S3 bucket policy + ssm:GetParameter on /masdr-proto/*), SSM Parameter Store SecureString for ANTHROPIC_API_KEY and ACCESS_CODE, S3 bucket masdr-proto-data-<acct> (releases/, data/ backups), SSM Session Manager instead of SSH",
+   "Terraform 1.15 with S3 backend (use_lockfile = true), cloud-init user-data (<16 KB) that installs NodeSource Node 22, Caddy, awscli, Playwright Chromium deps, a 2 GB swapfile, the masdr systemd unit and /usr/local/bin/masdr-deploy",
+   "GoDaddy DNS: one A record masdr-proto -> Elastic IP (manual UI or PUT https://api.godaddy.com/v1/domains/thegentek.com/records/A/masdr-proto)"
+  ],
+  "pipeline_stages": [
+   {
+    "name": "0 intake + normalise",
+    "kind": "code",
+    "model": "none (sharp)",
+    "effort": "n/a",
+    "input": "multipart POST /api/jobs: image (JPEG/PNG/WebP <= 12 MB), description (<= 4000 chars, EN or AR), brand, style number (auto MSDR-YYMM-NNN), season, run quantity, target market, size run (default S/M/L, base M), sample-room language preference (en_primary | ar_primary)",
+    "output": "job row (status queued) in SQLite; original file in DATA_DIR/uploads; normalised JPEG <= 1568 px long edge, EXIF-rotated, flattened to white, plus a SHA-256 image hash used as a cache key for identical re-runs; 202 {jobId} returned immediately",
+    "why": "Factory readers never see this stage but it decides token cost (~1.3-1.5K visual tokens per image) and lets a browser refresh or proxy hiccup survive a 60-120 s generation because the job is persisted before any model call."
+   },
+   {
+    "name": "1 vision observation",
+    "kind": "llm",
+    "model": "claude-opus-5",
+    "effort": "medium",
+    "input": "normalised image (base64) + buyer description; byte-stable VISION_SYSTEM prompt; output_config.format = zodOutputFormat(VisionObservation); thinking adaptive; fallbacks 'default' with beta server-side-fallback-2026-07-01",
+    "output": "VisionObservation: product_type, product_family enum, input_kind (photo/sketch/flat), panels_observed, brim {present, width_class, topstitch_rows|null}, crown {height_class, shape}, closures_hardware, colours[{area,name,hex_estimate}], text_in_image verbatim, reversible_evidence, construction_cues, per-attribute confidence, overall_confidence, and NEW detail_regions[{purpose: brim_edge|crown_top|label|hardware|seam, bbox normalised 0-1}]",
+    "why": "The model is used only for what it is good at: naming what is visible. It reports classes (narrow/medium/wide brim) and counts (topstitch rows), never finished measurements; SO-Bench-style image->JSON exact-value accuracy is <12%, so numbers are left to code."
+   },
+   {
+    "name": "2 detail zoom (conditional)",
+    "kind": "llm",
+    "model": "claude-sonnet-5",
+    "effort": "low",
+    "input": "sharp crops of the ORIGINAL image at the bboxes from stage 1 (max 3 crops, each <= 1200 px) + the stage-1 answers for those attributes; only runs when overall_confidence != high or topstitch_rows is null or a label region was found",
+    "output": "DetailConfirmation: topstitch_rows (int|null), topstitch_offset_class, label_present + printed text, hardware confirmation, each with confidence; merged into the observation by code (detail wins over the first pass only when its confidence is higher)",
+    "why": "Sample rooms bounce packs whose stitch rows or label placement contradict the reference sample. A cheap zoom pass on full-resolution crops fixes the most common vision misses without a tool-use loop; the whole stage is skipped for clean sketches."
+   },
+   {
+    "name": "3 merge + route",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "VisionObservation (+DetailConfirmation), buyer description, options",
+    "output": "ProductBrief: template_id (bucket_hat when product_family==bucket_hat or /bucket\\s*-?hat/ in text; else generic), resolved attributes with the rule 'buyer text wins over image, every conflict is recorded as an assumption with impact', detected language of the brief (AR briefs are kept verbatim and passed as-is), the explicit reversible flag, the colour list (khaki/black -> nearest rulebook TCX refs)",
+    "why": "Deterministic routing keeps the expensive draft prompt byte-stable (cache hits) and makes the text-vs-image conflict policy auditable instead of implicit in a prompt."
+   },
+   {
+    "name": "4 draft (base size only)",
+    "kind": "llm",
+    "model": "claude-opus-5",
+    "effort": "high",
+    "input": "system = [DRAFT_SYSTEM_STABLE incl. the full BUCKET_HAT_RULEBOOK JSON, cache_control ephemeral] ; user = ProductBrief + observation JSON + 'write the tech pack for base size M only'; output_config.format = zodOutputFormat(TechPackDraft); streamed with messages.stream(); max_tokens 40000; fallbacks 'default'",
+    "output": "TechPackDraft: header, product (description/intended use/fit intent EN+AR), hat_base_intent {inner_circumference_cm, crown_height_cm, brim_width_cm, band_taper_cm, topstitch_offset_cm, topstitch_rows, each with source+confidence+note} OR generic_poms for non-hat templates, bom[] with provenance, operations[] (adapted from the rulebook op sheet, EN+AR), colorways[] with Pantone TCX+hex and label side, labels[], packaging, qc, assumptions[], questions_for_factory[]; stream deltas drive a 'sections written' progress counter by detecting top-level keys as they appear",
+    "why": "The model contributes judgement (what this product is, which rulebook defaults to keep or override, the Arabic technical wording) but only ONE size and only intent values; everything graded or geometric is recomputed downstream so S/M/L can never disagree with each other or with the flats."
+   },
+   {
+    "name": "5 geometry, cut sheet, consumption, flats",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "hat_base_intent + size run (offsets -1/0/+1 from base) + rulebook constants (ease 1 cm, grade 2 cm, tolerances A ±1.0 / B ±0.5 / C ±0.3 / D ±0.5 / E ±0.5 / F ±1.5 / G ±0.1 / H ±0.5)",
+    "output": "POM chart for S/M/L (A inner circumference 57/59/61, B crown side height, C brim width, H tip circumference = A - taper, D tip diameter = H/π, E total height = B + C, F brim outer circumference = A + 2πC, G topstitch offset) each with derivation text, source and confidence; pattern pieces with cut dimensions incl. 1 cm SA (tip circle Ø, band trapezoid, brim half-annulus radii) and net area; consumption per colour (net -> gross at marker efficiency 0.62 -> metres at 147 cm usable width × (1+3% shrinkage) -> grams at 280 gsm, run totals when quantity given, formulas listed); three SVG flats (side elevation, top plan, underside) with <g id='pom-X'> callouts",
+    "why": "This is the single biggest differentiator evaluators will check: numbers are derived from head circumference and printed with their formula, so grading is uniform, tip diameter agrees with circumference, and the sketch is dimension-true by construction. No competitor surveyed does this."
+   },
+   {
+    "name": "6 assemble + validate + readiness score",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "draft + derived geometry + rulebook fallbacks (labels, packaging, QC, thread, stitching) + options",
+    "output": "TechPack (Zod-validated) minus readiness/pipeline; ValidationResult {errors, warnings}: >=3 sizes, base marked, monotonic grade, tolerances present, D≈H/π and F≈A+2πC within 0.15/0.3 cm, every POM anchored on a flat and every claimed anchor present in the SVG, BOM has fabric/thread/label(/packaging), fabric has gsm+width, qty>0, stitch/SPI/SA present, _ar twins present, glossary terms used (حياكة زخرفية, بدل الخياطة, محيط الرأس); readiness checklist scored from the top factory rejection causes (missing tolerances, colour by name only, no thread/SPI, no label/packaging spec, no QC criteria)",
+    "why": "Code gates catch what a merchandiser would bounce before any model is asked to review; the readiness score is shown to the buyer as the signal for 'send to factory'."
+   },
+   {
+    "name": "7 factory critique",
+    "kind": "llm",
+    "model": "claude-sonnet-5",
+    "effort": "low",
+    "input": "assembled pack JSON (SVGs replaced by their POM code lists) + validation result; CRITIQUE_SYSTEM persona = production manager at an Egyptian apparel factory reviewing before sampling; output_config.format = zodOutputFormat(CritiqueOutput)",
+    "output": "CritiqueReport {factory_readiness_score, verdict pass|repair, issues[{section, issue, fix, severity blocking|warning}], strengths[]}; stored on the pack and shown in the UI as 'Factory review'",
+    "why": "A second, cheaper model in the factory's chair finds unsewable sequences, missing DTM thread rules, Arabic that reads as machine translation, and reversible-specific traps (which face carries the care label) that schema validation cannot see. Failure of this stage is non-fatal (recorded as skipped)."
+   },
+   {
+    "name": "8 repair loop (max 2)",
+    "kind": "llm",
+    "model": "claude-opus-5",
+    "effort": "medium",
+    "input": "current TechPackDraft + blocking critique issues + code validation errors; system = DRAFT_SYSTEM_STABLE (cache hit) + REPAIR_SYSTEM_SUFFIX",
+    "output": "revised TechPackDraft -> re-run stages 5-6 (and 7 once more if blocking issues remained); loop ends on zero errors or after 2 repairs, in which case the pack is finalised with status 'draft' and the unresolved issues listed under 'Questions for the factory' so a human resolves them",
+    "why": "Bounded repair keeps latency and cost predictable (~$0.30-0.60 and 60-120 s per pack) and never hides an unresolved problem from the factory reader."
+   },
+   {
+    "name": "9 finalise, version, pre-render exports",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "final TechPack + stage records (model, ms, tokens, cache reads, cost)",
+    "output": "pack v1.0 saved to packs + pack_versions (immutable JSON), job marked complete, SSE 'complete' event; background tasks pre-render PDF EN and PDF AR and the XLSX into DATA_DIR/exports/<packId>/<version>/ so downloads are instant; files named <BRAND>-<STYLE#>_TP_v<NN>_<YYYY-MM-DD>.<ext>",
+    "why": "Factories work from files, not links; pre-rendering means the merchandiser's first click is a download, and immutable versions mean 'which pack did you cut from' has one answer."
+   },
+   {
+    "name": "10 buyer review and edit",
+    "kind": "human",
+    "model": "none",
+    "effort": "n/a",
+    "input": "web pack view with per-field provenance chips and confidence, section-level edit forms (header, product, POM base values, BOM, operations, colorways, labels, packaging, QC, assumptions, questions)",
+    "output": "PATCH /api/packs/[id] applies the edit; editing any base-size POM re-derives S/L, pattern pieces, consumption and flats in code; version bumps 1.x -> 1.(x+1) with a revision-log entry; exports re-render",
+    "why": "The buyer must be able to overrule the AI (fit intent, brim width, whether eyelets exist) and still get a consistent pack; the regrade-on-edit guarantee is what makes edits safe."
+   },
+   {
+    "name": "11 factory acknowledgement",
+    "kind": "human",
+    "model": "none",
+    "effort": "n/a",
+    "input": "share link /packs/[id]?token=... (or QR on the PDF cover) opened by the factory merchandiser; acknowledgement form with Arabic gloss: sample size confirmed (M), units cm confirmed, tolerances accepted, fabric lot shrinkage result, thread Tex/colour availability, label supplier, sample lead time (days), name/role/date",
+    "output": "row in acknowledgements; pack header status draft -> reviewed; acknowledgement page appended to PDF/XLSX; buyer notified in the packs list",
+    "why": "The pack itself asks the questions only the factory can answer, in the factory's language, and records the answers against the version, closing the loop that every surveyed AI tool leaves open."
+   },
+   {
+    "name": "12 sample review round",
+    "kind": "llm",
+    "model": "claude-sonnet-5",
+    "effort": "low",
+    "input": "sample comment form: round (proto/fit/PP/TOP), date, free-text comment (Arabic or English), measured values per POM for the sample (optional), photos (optional); model call only to translate the comment to the other language and map it to POM codes/sections; output_config.format = zodOutputFormat(SampleCommentNormalised)",
+    "output": "sample_reviews row {round, comment_en, comment_ar, affected_poms[], action}; measured-vs-spec deltas computed in code and flagged when outside tolerance; version bump 1.x -> 1.(x+1) (2.0 only for construction changes) with revision-log entry; exports re-render",
+    "why": "Egyptian sample rooms comment in Arabic and merchandisers reply in English; normalising both directions and tying comments to POM codes makes the revision log usable by both sides and gives evaluators a visible, working revision protocol."
+   }
+  ],
+  "techpack_schema_outline": "TechPack (Zod, src/lib/techpack/schema.ts, JSON export = this object verbatim):\n- meta {id, version '1.0', created_at, updated_at, template_id 'bucket_hat'|'generic', generator {primary_model, pipeline_version}, image_hash}\n- header {style_number, style_name_en/ar, brand, season, category_en/ar, product_type_en/ar, base_size 'M', units 'cm', date, status draft|reviewed|approved, share_token}\n- product {description_en/ar, intended_use_en/ar, fit_intent_en/ar, key_features_en/ar[], reference_observations_en[]}\n- sizes[] {code, label_en/ar, fits_note_en ('fits head 57-58 cm'), is_base}\n- poms[] {code A..H, name_en/ar, how_to_measure_en/ar, values {S,M,L}, tolerance_cm, derivation ('D = H / π'), source measured|stated|derived|default|inferred, confidence high|medium|low}\n- pattern_pieces[] {name_en/ar, qty_per_shell, qty_total, cut_dimensions_base_en, notes_en, net_area_cm2}\n- bom[] {ref F1/F2/T1/T2/L1/L2/P1, category fabric|interfacing|thread|label|trim|hardware|packaging|other, item_en/ar, description_en, composition, weight_gsm, width_cm, placement_en/ar, qty_per_unit, unit, colour_rule_en, supplier ('TBC by factory'), notes_en, source, confidence}\n- construction {standards {stitch_type '301 lockstitch (ISO 4915)', seam_type, spi_seam, spi_topstitch, seam_allowance_cm 1.0, topstitch_offset_cm 0.6, topstitch_rows 1, needle, thread_seaming, thread_topstitch, interfacing_en, pressing_en}, operations[] {step, operation_en/ar, machine, stitch, spi, notes_en/ar}, sam_estimate_min, sam_note_en, special_notes_en/ar[]}\n- colorways[] {code CW1/CW2, name_en/ar, components[] {component_en/ar (outer shell, reverse shell, brim topstitch needle, bobbin, label), colour_name, pantone_tcx '16-0726 TCX', hex '#A39264', bom_ref}, thread_needle, thread_bobbin, label_side_en/ar, notes_en} + colorway_note_en/ar ('both colorways are the same physical hat; differentiate by label side and hangtag')\n- labels[] {type, placement_en/ar, content_en/ar (ES 7266-3 fibre %, ES 1405/ISO 3758 care, صنع في مصر / Made in Egypt, manufacturer), notes_en}\n- packaging {method_en/ar, items_en[], carton_note_en}\n- qc {aql_en 'ISO 2859-1 GII, AQL 2.5 major / 4.0 minor', checks_en/ar[], tests_en[]}\n- consumption {fabric_width_cm, usable_width_cm, marker_efficiency, shrinkage_allowance_pct, per_unit[] {colour, net_area_cm2, gross_area_cm2, metres_per_unit, grams_per_unit}, formulas_en[], run_quantity, run_totals_m[]}\n- flats[] {id side|top|underside, title_en/ar, svg (inline, viewBox mm, <g id='pom-X'> anchors), pom_codes[]}\n- assumptions[] {text_en/ar, impact low|medium|high}\n- questions_for_factory[] {text_en/ar}\n- readiness {score 0-100, checks[] {item_en, pass, note_en}}\n- acknowledgement {status pending|acknowledged, sample_size, units_confirmed, tolerances_accepted, shrinkage_result_pct, thread_available, label_supplier, lead_time_days, acknowledged_by, role, date} | null\n- sample_reviews[] {round proto|fit|pp|top, date, comment_en/ar, affected_poms[], measured_values {POM: {size: cm}} | null, out_of_tolerance[], action, author}\n- revision_log[] {version, date, author, change_en}\n- pipeline {stages[] {name, kind llm|code, model, ms, input_tokens, output_tokens, cache_read_tokens, cost_usd, note}, critique CritiqueReport|null, validation {errors[], warnings[]}, total_cost_usd, total_ms}\nLLM-facing schemas (src/lib/ai/llm-schemas.ts) are separate and grammar-safe: VisionObservation, DetailConfirmation, TechPackDraft (hat_base_intent OR generic_poms), CritiqueOutput, SampleCommentNormalised; enums only, .nullable() instead of optional, no numeric bounds, byte-stable so grammar and prompt caches hit.",
+  "ui_flow": [
+   "Access: optional shared access code (/access, cookie set by proxy.ts) so the public URL is gated without accounts; Caddy basic_auth is a second optional layer.",
+   "New pack (/): Masdr-themed hero, three-step strip (Upload & describe -> AI writes the pack -> Send to verified factories). Form: image dropzone (JPEG/PNG/WebP <= 12 MB, preview), short description (EN or AR, placeholder shows the bucket-hat brief), brand, style number (auto), season, run quantity, target market (Egypt domestic default; export toggles EU/US label fields), size run (S/M/L default), sample-room language (EN primary + AR gloss | AR primary). 'Use the bucket hat example' fills everything from /public/examples/masdr_bucket_hat.png.",
+   "Submit: POST /api/jobs returns 202 {jobId} at once; client navigates to /jobs/[id] and opens EventSource /api/jobs/[id]/events (history replayed on reconnect, 15 s heartbeats, closes on complete/failed).",
+   "Progress page: vertical stage list (Preparing image -> Reading the reference -> Checking details -> Choosing template -> Writing the draft -> Deriving geometry and validating -> Factory review -> Fixing issues -> Complete) with model name, elapsed ms and cost per stage; during the draft a 'sections written' counter (header, product, BOM, operations, colorways, labels, QC) updates from the streamed JSON keys; percent bar 0-100; on failure a plain-language error plus 'Try again' that re-enqueues the same upload.",
+   "Pack view (/packs/[id]): sticky toolbar with EN/AR toggle (dir=rtl + Cairo font in AR), version badge, readiness score chip, buttons PDF / Excel / JSON / Sample-room sheet / Share with factory / Send to verified factories (mocked handoff into Masdr RFQ). Sections in factory order: cover; technical flats with numbered callouts; graded spec chart (S/M/L, tolerance, how-to-measure, derivation, source, confidence chips: measured / stated / derived / default / inferred); cut sheet and consumption with formulas; BOM; construction standards + numbered operation sheet (EN line, AR line beneath); colorway matrix with swatches, TCX, hex, needle/bobbin thread and label side, plus the 'same physical hat' note; labels and packaging incl. the Arabic ES 7266 label block; QC/AQL; factory acknowledgement; assumptions and questions for the factory; factory review (critique); revision log and sample reviews; generation record (models, tokens, cost, time).",
+   "Edit: every section has Edit -> inline form -> Save; saving a base-size POM regrades S/L, re-cuts pieces, recomputes consumption and redraws flats; every save bumps v1.x and appends to the revision log; exports are re-rendered in the background.",
+   "Factory link (/packs/[id]?token=...): read-only pack in the factory's chosen language mode plus the acknowledgement form (sample size, units, tolerances accepted, lot shrinkage %, thread availability, label supplier, lead time, name/role) and a sample-comment form (round, comment AR/EN, measured values per POM, photo). QR code on the PDF cover points here so revisions are pulled, not emailed.",
+   "My packs (/packs): list of jobs and packs with status, version, readiness, acknowledgement state and last sample round; re-open, duplicate as new style, or download.",
+   "Print route (/packs/[id]/print?lang=en|ar&mode=full|sample_room): the same React components under @page A4 landscape CSS, one section per page, used by the browser's print and by Playwright for the PDF."
+  ],
+  "export_strategy": "Author once as HTML, export three ways from the same TechPack JSON. (1) PDF: GET /api/packs/[id]/export/pdf?lang=en|ar&mode=full|sample_room -> Playwright (bundled Chromium, singleton browser, new context per render, locale ar-EG or en-GB, deviceScaleFactor 2) loads /packs/[id]/print, awaits networkidle and document.fonts.ready, then page.pdf({format:'A4', landscape:true, preferCSSPageSize:true, printBackground:true, displayHeaderFooter:true, footer = 'Masdr Tech Pack · style · v<version> · <date> · page N/M'}). Page order in the full PDF: 1 cover (style, brand, season, version, date, colorway thumbnails, QR to live pack, contact); 2 product description and intended use with the reference photo; 3-4 technical flats with numbered POM callouts (side, top, underside) on the same page as their notes; 5 graded spec chart S/M/L with tolerance, how-to-measure and derivation; 6 cut sheet and consumption; 7 BOM; 8 construction standards and numbered operation sheet; 9 colorway matrix; 10 labels and packaging (Arabic ES 7266 label artwork block); 11 QC and AQL; 12 factory acknowledgement (form fields with Arabic gloss); 13 assumptions and questions for the factory; 14 revision log and sample reviews. English primary, Arabic gloss line under each heading/POM/BOM/operation, page direction LTR, each Arabic span dir=rtl lang=ar with unicode-bidi:isolate, Latin digits and units everywhere; the sample_room mode prints Arabic-primary and contains only the cut sheet, operation sheet, POM chart and flats. Fonts (Inter, Cairo/Noto Sans Arabic, Geist Mono) are bundled as local WOFF2 so rendering never depends on the network. (2) XLSX: ExcelJS workbook with sheets Cover, Flats (PNG of each SVG rasterised via a Playwright screenshot, addImage), POM_Spec (base-size M values as inputs, S and L as live formulas =M-2 / =M+2 and =H/PI() etc. so editing M regrades the chart in Excel; tolerance column; a 'Factory comment' column with data-validation dropdown OK / Adjust / Query), Cut_Sheet, BOM (qty × unit price columns left blank for costing), Construction, Colorways, Labels_Packaging, QC, Acknowledgement, Revision_Log; pageSetup A4 landscape fitToWidth; views rightToLeft only when lang=ar. (3) JSON: the TechPack object verbatim (Content-Disposition attachment) for the Masdr RFQ flow and for evaluators. All three are pre-rendered per version into DATA_DIR/exports/<packId>/<version>/ after finalise and after every edit/acknowledgement/sample round, served from disk if present, regenerated on demand otherwise; file names <BRAND>-<STYLE#>_TP_v<NN>_<YYYY-MM-DD>.pdf/.xlsx/.json; immutable per version, backed up to S3.",
+  "hosting": "Path A (front-runner, chosen): one EC2 instance behind Caddy at https://masdr-proto.thegentek.com, all in Terraform. Region eu-central-1 (Frankfurt, ~68 ms from Cairo; eu-west-1 works identically if the account default must stay). Instance t3.small x86_64 Ubuntu 24.04 (build parity with the WSL2 x86_64 machine so the Next.js standalone bundle, sharp and Playwright Chromium binaries match; switch to t4g.small arm64 only if you build on the box), 20 GB gp3 root, 2 GB swapfile, Elastic IP, IMDSv2 required, security group 80/443 only (no 22), instance profile with AmazonSSMManagedInstanceCore + s3:Get/Put/List on masdr-proto-data-<acct> + ssm:GetParameter on /masdr-proto/*. Secrets: /masdr-proto/ANTHROPIC_API_KEY and /masdr-proto/ACCESS_CODE as SSM SecureString written with aws ssm put-parameter (never in Terraform state); the box writes /etc/masdr/env (0600) from them at boot. Runtime: systemd unit masdr.service (User=masdr, WorkingDirectory=/opt/masdr/current, EnvironmentFile=/etc/masdr/env, ExecStart=/usr/bin/node .next/standalone/server.js, PORT=3000, DATA_DIR=/var/lib/masdr, INTERNAL_BASE_URL=http://127.0.0.1:3000, JOB_CONCURRENCY=3, Restart=always). Caddyfile: masdr-proto.thegentek.com { encode gzip; request_body { max_size 20MB }; reverse_proxy 127.0.0.1:3000 { flush_interval -1 } } (flush_interval -1 keeps SSE unbuffered; optional basic_auth block). cloud-init runcmd: NodeSource Node 22, Caddy from cloudsmith repo, awscli, unzip, npx playwright@1.62.1 install --with-deps chromium as the masdr user, unattended-upgrades, swapfile, useradd masdr, /usr/local/bin/masdr-deploy, systemctl enable --now masdr caddy, hourly cron 'aws s3 sync /var/lib/masdr s3://<bucket>/data/' for SQLite+uploads+exports backup. Terraform (1.15, S3 backend with use_lockfile=true, key masdr-proto/terraform.tfstate): data aws_ssm_parameter for the Ubuntu 24.04 AMI, default VPC/subnet, security group, IAM role + instance profile, S3 bucket with public-access block, SSE-S3 and 30-day lifecycle on uploads/, aws_instance with user_data = templatefile('cloud-init.yaml', {domain, bucket, region}), aws_eip + association, aws_budgets_budget at $30, outputs eip and instance_id. Order of first deploy: (0) admin creates IAM user masdr-proto-deployer with the EC2/IAM-role/SSM/S3/budgets policy, aws configure --profile masdr, install session-manager-plugin; (1) terraform apply -target=aws_eip.app; (2) create GoDaddy A record masdr-proto -> EIP TTL 600; (3) pnpm build locally, zip .next/standalone + .next/static + public -> aws s3 cp release.zip s3://<bucket>/releases/latest.zip; (4) terraform apply (full) — Caddy retries ACME until DNS resolves; (5) verify: dig +short masdr-proto.thegentek.com, curl -I https://masdr-proto.thegentek.com/api/health, aws ssm start-session --target <id> then journalctl -u masdr -u caddy -n 200. Redeploy loop (no Docker, no SSH): pnpm build -> zip -> aws s3 cp -> aws ssm send-command --document-name AWS-RunShellScript --targets Key=tag:Name,Values=masdr-proto --parameters 'commands=[\"/usr/local/bin/masdr-deploy\"]' (script: download zip, unzip to /opt/masdr/releases/<ts>, symlink current, systemctl restart masdr) -> poll get-command-invocation. Cost about $20-22/month. Do not terraform destroy/apply the instance more than a few times per week (Let's Encrypt duplicate-cert limit). Alternative Path B kept in the docs: Lambda arm64 2048 MB + Lambda Web Adapter (response_stream) + Function URL + CloudFront (ACM us-east-1, origin timeout 120 s) + presigned S3 uploads + SSE heartbeats <= 25 s; rejected for v1 because Chromium PDF needs a container image (no local Docker) and the 6 MB sync payload cap complicates uploads.",
+  "risks": [
+   "Vision misreads (topstitch rows, brim class, hidden reverse face) propagate into intent values: mitigated by the conditional detail-zoom pass, per-attribute confidence chips, 'text wins over image' with conflicts logged as assumptions, and editable base values with automatic regrade.",
+   "Arabic quality: model-written Arabic can read as machine translation or use Levantine/Gulf terms instead of Egyptian sample-room vocabulary; mitigated by a fixed glossary in the rulebook and prompt, a code glossary check, the Sonnet critique persona, and the fact that all numbers/units/codes stay Latin so a wrong word never changes a measurement. A native Egyptian merchandiser review of the glossary before the demo is still needed.",
+   "Refusals / classifier stops on claude-opus-5 returning stop_reason 'refusal' mid-pipeline: handled by server-side fallbacks 'default' plus the manual claude-sonnet-5 retry; always branch on stop_reason before parsing content.",
+   "Structured-output truncation (stop_reason max_tokens on a 40K-token draft) or Zod parse failure: one retry with higher max_tokens, then fail the job with a clear message; schemas stay byte-stable so grammar compilation is cached.",
+   "Rate limits / usage tier: run 20-30 warm-up generations before the demo, confirm Start-tier limits and purchased credits; JOB_CONCURRENCY=3 and a per-job cost cap (~$1.50) prevent runaway spend; typed SDK errors (RateLimitError, APIConnectionError) are retried by the SDK (maxRetries 3) and surfaced otherwise.",
+   "Latency: 60-120 s end to end at effort high; if a live demo needs < 60 s, drop draft effort to medium and skip the second critique — the eval set is there to measure the quality delta before changing defaults.",
+   "Chromium on a 2 GiB instance: PDF renders can OOM under concurrent exports; mitigated by the singleton browser, one context per render, pre-rendering exports in the background right after finalise, and the swapfile; t3.medium is the escape hatch.",
+   "Build/target architecture mismatch (sharp, Chromium) if the team switches to a Graviton instance while still building on WSL2 x86_64: either keep t3.small or move the build onto the box.",
+   "Single-instance persistence: SQLite + local disk with hourly S3 sync means up to one hour of data loss on instance failure; acceptable for a prototype, documented; EBS snapshots via DLM can be added.",
+   "Generic (non-hat) products only get the model's generic_poms with no code-derived geometry: the pack still passes schema and validators but with lower confidence flags; evaluators are told the bucket hat is the fully-derived template.",
+   "Colorway semantics: the two briefed colorways are physically the same hat; the pack says so and differentiates by label side/hangtag, but the brand must decide one SKU vs two — captured as a question for the factory, not silently decided.",
+   "Regulatory content (ES 7266-3/2023, ES 1405 care symbols) is rendered as a template, not legal advice; label artwork must still be approved by the brand and factory.",
+   "Fonts/branding: Masdr's licensed Adrianna/Satoshi are substituted with open fonts; use of the MASDR wordmark on a public URL may need Masdr's permission — the access code keeps the prototype private."
+  ],
+  "differentiators": [
+   "Numbers are computed, not guessed: head circumference drives S/M/L (57/59/61 cm), tip diameter = H/π, brim outer circumference = A + 2πC, cut dimensions and metres-per-colour, with the formula printed beside each value and validators that refuse an inconsistent chart.",
+   "Per-field provenance and confidence (measured from image / stated by buyer / derived by formula / industry default / AI inferred) on every POM and BOM line, plus a separate 'Assumptions' and 'Questions for the factory' page instead of a buried disclaimer.",
+   "Factory-order document with a numbered operation sheet (301 lockstitch, SPI, SA, needle, Tex, DTM needle/bobbin rule for the reversible brim) rather than prose 'construction notes', and dimension-true SVG flats whose callouts are bound to the POM values.",
+   "Bilingual by design: English primary with an Arabic technical gloss on every heading, POM, BOM line and operation, Latin digits throughout, plus an Arabic-first sample-room sheet for cutters and sewers, and an ES 7266 / ES 1405 Arabic label block.",
+   "Closed acknowledgement and revision loop inside the pack: factory acknowledgement form (sample size, units, tolerances, lot shrinkage, thread availability, lead time), sample-review rounds tied to POM codes with measured-vs-spec deltas, immutable versions and a revision log.",
+   "Three real exports for free: PDF (same HTML as the web view, correct Arabic shaping), XLSX with live grading formulas and a factory-comment dropdown, and machine-readable JSON for the Masdr RFQ handoff.",
+   "Transparent generation record: per-stage model, effort, tokens, cache hits, cost (~$0.30-0.60) and time, plus the factory-readiness score and the factory critique shown to the buyer.",
+   "Reversible-hat awareness: explicitly states that 'khaki outer / black reverse' and 'black outer / khaki reverse' are the same physical hat and specifies how the factory differentiates the two colorways."
+  ],
+  "effort_estimate_days": 8
+ },
+ {
+  "name": "Masdr Tech Pack (correctness-first pipeline)",
+  "summary": "A single Next.js 16 / Node 22 service (already scaffolded at /home/doct0rx/gentek/masdrmena/prototype/app, pipeline v0.3.0, ~2.7k lines) that turns one photo/sketch plus a short brief into a factory-ready, bilingual EN/AR tech pack. The correctness principle is strict division of labour: the LLM (claude-opus-5) only observes the image and proposes base-size INTENT plus prose/BOM/ops with provenance; every graded number (S/M/L POMs, tip diameter, brim circumference, pattern-piece dims, consumption per colour, colourway matrix, Pantone/hex refs) is computed in TypeScript from a versioned rulebook and printed with its formula. Correctness is enforced by four gates: Zod schema (grammar-constrained structured outputs via output_config.format), deterministic business-rule validators (monotonic grading, uniform 2 cm grade, D = H/π, F = A + 2πC, A > H, tolerances present, every POM anchored in the parametric SVG flat, prose-vs-POM number cross-check, Arabic-script and Latin-digit checks, ES 7266 label presence), an independent critic on a different model (claude-sonnet-5) that is forbidden from re-judging code-derived numbers, and a bounded repair loop (max 2, must strictly reduce errors, else needs_human_review). Output is persisted in node:sqlite + JSON files, streamed to the browser over SSE with replay, and exported as PDF (Playwright/Chromium print of the same HTML, correct Arabic shaping), XLSX (exceljs with live regrade formulas) and JSON. Hosted on one x86_64 EC2 instance behind Caddy TLS at masdr-proto.thegentek.com via Terraform + cloud-init + SSM (no Docker, no SSH). Canonical case yields A 57/59/61 (±1.0), B 8.5/9.0/9.5 (±0.5), C 6.5 (±0.3), D 17.4/18.0/18.6, F 97.8/99.8/101.8, G 0.6 cm single row, 301 lockstitch 10–12 SPI, Tex 27–30 seaming / Tex 40 topstitch, ~0.22 m khaki + 0.22 m black per hat, with the pack explicitly flagging that the two colourways are the same physical hat.",
+  "stack": [
+   "Runtime: Node.js 22.19 + pnpm 10.33 (Python 3.14 not used at runtime; optional only for an offline eval script)",
+   "Framework: Next.js 16.3.4 App Router, output: 'standalone', React 19.2, Tailwind 4 with Masdr palette tokens (#5F50BC primary, #362E83 CTA, #F8F6F1 cream, #232B32 headings), Cairo font for Arabic, Geist Mono for spec numbers",
+   "LLM: @anthropic-ai/sdk 0.123.0, zodOutputFormat from @anthropic-ai/sdk/helpers/zod, client.messages.stream(...).finalMessage(), thinking {type:'adaptive'}, output_config {effort, format}; models claude-opus-5 (vision, draft, repair), claude-sonnet-5 (critic + refusal/429 fallback); claude-fable-5-1 only via ANTHROPIC_MODEL_PRIMARY for A/B (no forced tool_choice, 2x price)",
+   "Schemas: Zod 4 — llm-schemas.ts (LLM-facing: no records, no numeric min/max, nullable not optional, enums for stitch 301/401/504, SPI, Tex, seam classes) and techpack/schema.ts (final document with provenance + confidence on every AI-influenced row)",
+   "Deterministic core: src/lib/rulebook/bucket_hat.ts (numbers, tolerances, ops, QC, Arabic POM names), src/lib/geometry/bucket_hat.ts (grading, pattern pieces, consumption), src/lib/flats/bucket_hat.ts (parametric inline SVG, viewBox in mm, <g id='pom-X'> anchors), src/lib/techpack/validate.ts (rules + readiness checklist)",
+   "Images: sharp 0.34 (EXIF rotate, flatten, resize ≤1568 px, full-res crop extraction for the zoom tool)",
+   "Persistence: node:sqlite DatabaseSync (built into Node 22, no native build) in DATA_DIR/masdr.sqlite + JSON/PNG files on disk; S3 mirror of packs/ and uploads/ in prod via instance role",
+   "Jobs/streaming: in-process bounded queue (JOB_CONCURRENCY=3) + EventEmitter bus + SQLite events table; SSE route with Last-Event-ID replay and 15 s heartbeats",
+   "Exports: Playwright 1.62 + bundled Chromium (page.pdf A4, preferCSSPageSize, printBackground, tagged) printing /packs/[id]/print?lang=; exceljs 4.4 for XLSX with formulas and data validation; raw JSON",
+   "Tests: Vitest 3 (geometry, validators, rulebook completeness, golden run on public/examples/masdr_bucket_hat.png); Playwright smoke test of UI",
+   "Infra: Terraform 1.15 (S3 backend with use_lockfile), EC2 x86_64 Ubuntu 24.04 t3.medium, Caddy 2 (auto TLS), systemd, cloud-init, SSM Parameter Store (ANTHROPIC_API_KEY, ACCESS_CODE), SSM Session Manager/RunCommand for deploys, AWS CLI v2, GoDaddy A record"
+  ],
+  "pipeline_stages": [
+   {
+    "name": "0. normalize",
+    "kind": "code",
+    "model": "none (sharp)",
+    "effort": "n/a",
+    "input": "Uploaded PNG/JPEG/WebP ≤10 MB + brief text + options (brand, style no, season, run qty, target market, sizes)",
+    "output": "JPEG ≤1568 px long edge q90 (base64 for vision), full-res original kept for zoom crops, sha256 content hash, image dims",
+    "why": "Keeps first-pass vision cost at ~1.3–1.5K tokens, guarantees orientation/alpha correctness, and the hash is the idempotency/cache key so re-runs of the same image+brief reuse the VisionObservation."
+   },
+   {
+    "name": "1. vision_observe",
+    "kind": "llm",
+    "model": "claude-opus-5 (fallback claude-sonnet-5 on refusal/429)",
+    "effort": "medium, adaptive thinking, max_tokens 8000",
+    "input": "Normalized image + brief; strict tool `zoom` {x0,y0,x1,y1 in 0–1, reason} (max 3 calls, served from the full-res original via sharp.extract, tool_choice auto); output_config.format = zodOutputFormat(VisionObservation)",
+    "output": "VisionObservation: product_family enum, input_kind (photo/sketch/flat), panels_observed, brim {width_class, topstitch_rows|null}, crown {height_class}, colours [{area, name, hex_estimate}], text_in_image verbatim, reversible_evidence, closures_hardware, per-attribute confidence",
+    "why": "Observation only — the model is told to report what is visible and never invent measurements; classes (narrow/medium/wide) map to rulebook numbers in code, so a vision error changes a class, not an arbitrary digit. Zoom crops resolve topstitch-row counts and printed spec lines, the two things evaluators check first."
+   },
+   {
+    "name": "2. reconcile_and_route",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "VisionObservation + brief text + options",
+    "output": "ReconciledInput: template_id (bucket_hat|generic), stated facts extracted by regex/enum from the brief (gsm, fibre, weave, sizes list, colour names, 'reversible', topstitch rows), Pantone TCX + hex resolved from a fixed colour dictionary (Khaki 16-0726 TCX #A39264, Jet Black 19-0303 TCX #2D2C2F), conflict list (text vs image) with rule 'stated beats measured, both logged as assumptions'",
+    "why": "Deterministic precedence and a fixed colour dictionary prevent the model from inventing Pantone codes or silently overriding the buyer's stated spec; routing decides which rulebook and validator set apply."
+   },
+   {
+    "name": "3. draft",
+    "kind": "llm",
+    "model": "claude-opus-5 (fallback claude-sonnet-5)",
+    "effort": "high, adaptive thinking, streaming, max_tokens 40000",
+    "input": "Cached system prompt (cache_control ephemeral ttl 1h: role, provenance rules, Arabic glossary, full bucket-hat rulebook, one exemplar pack, byte-stable) + per-job brief (template, reconciled facts, observation JSON); output_config.format = zodOutputFormat(TechPackDraft)",
+    "output": "TechPackDraft: description/intended use EN+AR, hat_base_intent for size M ONLY as Sourced{value, source, confidence} (inner_circumference, crown_height, crown_height_grade, brim_width, band_taper, topstitch_offset, topstitch_rows), BOM lines with category enum + provenance, operation sheet (stitch/SPI/machine enums), colourways (names + which shell is 'outer' + label side), labels, packaging, QC prose, assumptions/open questions. generic_poms only for non-hat templates.",
+    "why": "The model contributes intent and factory language, not graded arithmetic. Schema enums and required-not-optional fields make every row complete; the cached rulebook grounds numbers in industry values so drift is caught by range clamps in stage 5."
+   },
+   {
+    "name": "4. derive_geometry",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "HatBaseIntent (M) + size run [S:-1, M:0, L:+1] + rulebook grades/tolerances",
+    "output": "POM chart A–H for every size with formula strings (A = girth max + 1 cm ease, ±2 cm/size; B = 9.0 ±0.5/size; C constant; H = A − taper; D = H/π; E = B + C; F = A + 2πC; G = 0.6 cm), pattern-piece cut dims incl. 1 cm SA (tip circle, 2 band trapezoids, 2 brim half-annuli per shell), net/gross area per colour, metres per hat at usable width × marker efficiency × shrinkage allowance, grams per hat, run totals, colourway matrix (CW1 khaki-out/black-in, CW2 mirror), three parametric SVG flats (side, top, underside) with <g id='pom-X'> leaders",
+    "why": "Every number an evaluator can check with a calculator is produced by a pure function with unit tests, rounded once (0.1 cm), and carries its formula; the drawing is generated from the same values so it cannot disagree with the table."
+   },
+   {
+    "name": "5. assemble",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "Draft + derived geometry + reconciled input + rulebook defaults",
+    "output": "PartialPack (TechPack minus readiness/pipeline): merged BOM (fabric consumption from stage 4 overrides model quantities, thread Tex from rulebook), construction standards, ops (draft ops mapped onto rulebook sequence; missing steps injected), colourways with same-hat flag, labels incl. bilingual ES 7266 care/content/origin block, QC/AQL block, assumptions list",
+    "why": "Range-clamps each intent value to the rulebook envelope (e.g. inner circumference 52–64 cm, brim 3–9 cm); out-of-range values are replaced by defaults and logged as assumptions with impact — so a model slip can never reach the factory page unflagged."
+   },
+   {
+    "name": "6. validate",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "PartialPack",
+    "output": "ValidationReport {errors[], warnings[]} + readiness checklist score (0–100)",
+    "why": "Hard rules: ≥3 sizes, one base, monotonic and uniform grade, D vs H/π within 0.15, F vs A+2πC within 0.3, A > H, tolerance > 0, every POM code anchored in an SVG and every SVG anchor in the chart, BOM has fabric/thread/label with gsm+width, hex regex + Pantone present, ≥5 ops with stitch/SPI/SA, numbers in construction prose (e.g. '6 mm') must equal G/SA/SPI fields, every _ar twin non-empty and matches \\p{Script=Arabic} with Latin digits only, care/content/origin label present, AQL stated, consumption > 0. Errors block finalisation; warnings are shown as chips."
+   },
+   {
+    "name": "7. critique",
+    "kind": "llm",
+    "model": "claude-sonnet-5 (independent model from the drafter)",
+    "effort": "medium, max_tokens 6000, non-fatal on error",
+    "input": "PartialPack with SVGs stripped + ValidationReport; system prompt: Egyptian factory production manager; explicitly told derived/measured-by-code numbers are out of scope",
+    "output": "CritiqueOutput {score 0–100, verdict pass|revise, issues [{section enum, issue, fix, severity blocking|minor}]}",
+    "why": "A second model family reviews factory-readiness of prose, BOM completeness, op-sheet clarity, label placement and Arabic quality — the things validators cannot score — without being able to 'correct' arithmetic it did not compute. Its report is persisted and shown to the user as provenance."
+   },
+   {
+    "name": "8. repair (≤2 iterations)",
+    "kind": "llm",
+    "model": "claude-opus-5",
+    "effort": "medium, streaming, max_tokens 40000",
+    "input": "Current draft + blocking critic issues + validator errors (as issues) + same cached system prompt + repair suffix",
+    "output": "Revised TechPackDraft → re-run stages 4–6 (and 7 once more if blocking issues remain)",
+    "why": "Bounded loop with a convergence guard: if error count does not strictly decrease, stop, keep the best-scoring build and set needs_human_review=true with the residual list — never loops forever, never hides unresolved issues."
+   },
+   {
+    "name": "9. finalize_and_persist",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "Best PartialPack + validation + critique + stage records (ms, tokens, cache reads, USD)",
+    "output": "TechPack.parse()'d document v1.0 saved to SQLite (packs, pack_versions) and DATA_DIR/packs/<id>/v1.0.json (+ S3 mirror in prod); job status complete; SSE 'complete' event",
+    "why": "One canonical JSON is the single source for web view, PDF, XLSX and the RFQ handoff; per-stage cost/latency is embedded so the demo can show ~$0.30–0.60 and ~60–90 s per pack."
+   },
+   {
+    "name": "10. export (on demand, cached per version)",
+    "kind": "code",
+    "model": "none",
+    "effort": "n/a",
+    "input": "TechPack version + lang (en|ar) + format (pdf|xlsx|json)",
+    "output": "<BRAND>-<STYLE>_TP_v1.0_<date>.pdf/.xlsx/.json served from cache after first render",
+    "why": "PDF prints the exact HTML the user reviewed (no divergence); XLSX POM sheet holds S/L as formulas off the M column so factory edits regrade consistently; JSON feeds the mocked 'Send to verified factories' RFQ step."
+   },
+   {
+    "name": "11. human_review",
+    "kind": "human",
+    "model": "none",
+    "effort": "n/a",
+    "input": "Rendered pack with confidence chips, assumptions page, critic report, editable fields",
+    "output": "Edited pack v1.x with revision log entry; re-derivation of dependent numbers on every edit; factory acknowledgement block",
+    "why": "Buyer confirms open questions (brim structure, label side, one SKU vs two) before sending; editing any base value re-runs stages 4–6 in code so the pack stays internally consistent after human changes."
+   }
+  ],
+  "techpack_schema_outline": "TechPack (Zod, src/lib/techpack/schema.ts) — meta {id, version 'v1.0', schema_version, template_id, brand, style_number, season, product_name_en/ar, created_at, lang_primary 'en', units 'cm', needs_human_review}; description {product_en/ar, intended_use_en/ar, reference_image_url, input_kind}; sizes [{code S/M/L, label_en/ar, fits_note_en 'fits head 57–58 cm', is_base}]; poms [{code A..H, name_en/ar, how_to_measure_en/ar, values {S,M,L}, tolerance_cm, derivation (formula text), source: measured|stated|derived|default|inferred, confidence: high|medium|low}]; flats [{id side|top|underside, svg (inline, mm viewBox), pom_codes[]}]; pattern_pieces [{name_en/ar, qty_per_shell, qty_total, cut_dimensions_base_en, net_area_cm2}]; bom [{ref F1/F2/T1/T2/L1/L2/P1, category enum fabric|interfacing|thread|label|trim|hardware|packaging, item_en/ar, description_en, composition, weight_gsm, width_cm, placement_en/ar, qty_per_unit, unit, colour_rule_en, supplier 'TBC by factory', source, confidence}]; construction {standards {stitch_type '301', seam_type 'SSa-1', spi_seam '10–12', spi_topstitch '8', seam_allowance_cm 1.0, topstitch_offset_cm 0.6, topstitch_rows 1, needle 'DBx1 Nm 80–90', thread_seaming 'Tex 27–30 core-spun poly', thread_topstitch 'Tex 40', interfacing_en, pressing_en}, operations [{step, operation_en/ar, machine, stitch, spi, notes_en/ar}], reversible_note_en/ar}; colorways [{code CW1/CW2, name_en/ar, components [{component_en/ar outer shell|inner shell|brim top|brim underside|thread needle|thread bobbin|label, colour_name, pantone_tcx, hex, bom_ref}], thread_needle, thread_bobbin, label_side_en/ar, notes_en 'same physical hat as CW2 — differentiated by label side/hangtag'}]; consumption {fabric_width_cm 150, usable_width_cm 147, marker_efficiency 0.80, shrinkage_allowance_pct 3, per_unit [{colour, net_area_cm2, gross_area_cm2, metres_per_unit, grams_per_unit}], formulas_en[], run_quantity, run_totals_m}; labels [{type brand|care_content|size|hangtag, placement_en/ar, content_en/ar (fibre %, ISO 3758 symbols, صنع في مصر / Made in Egypt, manufacturer), notes_en}]; packaging {polybag, carton, notes_en/ar}; qc {aql_en 'ISO 2859-1 GII, AQL 2.5 major / 4.0 minor', measurement_audit_en, tests_en[] (gsm ±5%, shrinkage ≤3%, colourfastness ISO 105-C06 ≥4, crocking), sample_stages [proto, fit, PP, TOP]}; assumptions [{text_en/ar, impact low|medium|high}]; open_questions_en/ar[]; readiness {score, checks [{label, ok, note}]}; revision_log [{version, date, author, note}]; pipeline {stages [{name, kind, model, ms, input_tokens, output_tokens, cache_read_tokens, cost_usd, note}], critique, validation {errors, warnings}, total_cost_usd, total_ms}. LLM-side schemas (llm-schemas.ts) are strict subsets: VisionObservation, TechPackDraft (hat_base_intent as Sourced{value,source,confidence} for M only; no graded arrays; no records; every field required/nullable), CritiqueOutput.",
+  "ui_flow": [
+   "/access (only if ACCESS_CODE set): shared code → signed cookie; proxy.ts gates everything else",
+   "/ landing in Masdr theme (indigo hero, MASDR wordmark, EN/AR locale pill): dropzone (photo/sketch, ≤10 MB), brief textarea with the canonical example prefilled ('Reversible bucket hat, 280 gsm cotton twill, khaki/black, S/M/L, single brim topstitch'), optional fields brand/style no/season/run qty/target market, 'Generate tech pack' pill CTA; a 'Try the sample hat' button loads public/examples/masdr_bucket_hat.png",
+   "POST /api/jobs (multipart) → {job_id} immediately; redirect to /jobs/[id]",
+   "/jobs/[id]: SSE from /api/jobs/[id]/events (stage timeline: Preparing image → Reading image (Opus 5) → Writing draft → Deriving geometry → Validating → Factory review (Sonnet 5) → Fixing N issues → Done); progress bar; live 'identified: reversible bucket hat' and section chips lighting as keys appear in the streamed JSON; per-stage ms and USD; heartbeat every 15 s; on reconnect Last-Event-ID replays from SQLite; fallback GET /api/jobs/[id] polling; failure state shows error_code + 'Retry' (reuses cached vision result)",
+   "/packs/[id]: canonical order — cover, description & intended use, flats with numbered leaders, POM chart S/M/L with tolerance + formula tooltip + provenance/confidence chip per row (measured/stated/derived/default/inferred), BOM, construction standards + numbered op sheet, colourway matrix with swatches (Pantone TCX + hex) and the same-hat flag, consumption math with formulas, labels & packaging (bilingual care label block), QC/AQL, assumptions & open questions, readiness score, critic report, revision log; EN/AR toggle (dir=rtl, Cairo font, logical CSS) with Arabic gloss under every heading/row in EN mode",
+   "Inline edit of any base value or text → PATCH /api/packs/[id] → re-derive + re-validate in code → new version v1.(x+1) with revision-log note; edit conflicts blocked by validator errors shown inline",
+   "Export bar: PDF (A4 landscape, lang-aware), XLSX, JSON at /api/packs/[id]/export/[format]?lang=; filename <BRAND>-<STYLE>_TP_v1.0_<date>",
+   "'Send to verified factories for quotes' CTA (mocked RFQ handoff with pack JSON + factory acknowledgement block); /packs lists prior packs"
+  ],
+  "export_strategy": "One HTML source, three outputs. PDF: /packs/[id]/print?lang=en|ar is a print-CSS page (@page A4 landscape, one section per page, sketch and its notes on the same page, footer with version/date/page), rendered by a long-lived Playwright Chromium (launched once, --no-sandbox, locale ar-EG for AR) via page.goto(INTERNAL_BASE_URL + path, waitUntil networkidle) → document.fonts.ready → page.pdf({format:'A4', landscape:true, preferCSSPageSize:true, printBackground:true, tagged:true, outline:true}); fonts (Inter/Satoshi, Cairo/Noto Sans Arabic, Geist Mono) bundled locally, never fetched at render time; SVG flats inline so numbers and drawing cannot diverge; English primary with Arabic gloss (dir=rtl, unicode-bidi:isolate spans, Latin digits for all numbers/units/POM codes). XLSX (exceljs): sheets Cover, POM_Spec (M values as numbers, S/L as formulas =M±n*grade, tolerance column, factory-comment column with data-validation list OK/Adjust/Query, flats embedded as PNG via Playwright screenshot), BOM (qty × price columns), Construction, Colorways, Consumption (formulas), Labels_QC, Revision_Log; pageSetup A4 landscape fitToPage; views rightToLeft only when lang=ar. JSON: the canonical TechPack document byte-for-byte as persisted (with pipeline provenance) for the RFQ handoff and for evaluators. Exports are generated on first request, cached per pack version under DATA_DIR/packs/<id>/exports/ (mirrored to S3), and served with Content-Disposition filenames <BRAND>-<STYLE>_TP_v<NN>_<YYYY-MM-DD>.<ext>.",
+  "hosting": "EC2 + Caddy + Terraform (front-runner, chosen). Region eu-west-1 (client-confirmed). One t3.medium x86_64 (4 GiB — Next standalone + Chromium + sharp need >2 GiB; x86_64 so the standalone bundle built on WSL2 matches the instance and Playwright's Chromium is the standard build), Ubuntu 24.04 AMI from SSM public parameter, gp3 20 GB, 2 GB swapfile, IMDSv2 only, Elastic IP, security group 80/443 only (no 22), instance profile with AmazonSSMManagedInstanceCore + inline S3 rw on masdr-proto-data-<acct> + ssm:GetParameter on /masdr-proto/*. Terraform 1.15 with S3 backend (use_lockfile=true); resources: default VPC/subnet lookups, SG, IAM role/profile, S3 bucket (public-access block, SSE-S3, lifecycle 30 d on uploads/), SSM SecureString /masdr-proto/ANTHROPIC_API_KEY and /masdr-proto/ACCESS_CODE (written with aws ssm put-parameter, not in state), aws_instance with user_data = templatefile(cloud-init.yaml), aws_eip + association, aws_budgets_budget $40 alarm, output eip. cloud-init: apt Caddy (cloudsmith repo), NodeSource Node 22, corepack pnpm, awscli v2, `npx playwright install-deps chromium`, useradd masdr, /etc/masdr/env from SSM (PORT=3000, DATA_DIR=/var/lib/masdr, S3_BUCKET, INTERNAL_BASE_URL=http://127.0.0.1:3000, JOB_CONCURRENCY=3, models), /etc/caddy/Caddyfile `masdr-proto.thegentek.com { encode gzip; request_body { max_size 20MB }; reverse_proxy 127.0.0.1:3000 { flush_interval -1; transport http { response_header_timeout 300s } } }`, systemd masdr.service (ExecStart=node server.js in /opt/masdr/current, Restart=always, EnvironmentFile), /usr/local/bin/masdr-deploy (s3 cp releases/latest.tgz → /opt/masdr/releases/<ts> → pnpm exec playwright install chromium → symlink current → systemctl restart), unattended-upgrades, daily EBS snapshot via DLM. Order: (1) admin provisions IAM user masdr-proto-deployer (EC2, IAM role/profile, SSM, S3, DLM, budgets), aws configure --profile masdr, AWS_REGION=eu-west-1; (2) terraform apply -target=aws_eip.app; (3) client adds GoDaddy A record masdr-proto → EIP TTL 600; (4) build release locally: pnpm build → tar .next/standalone + .next/static + public → aws s3 cp to s3://<bucket>/releases/latest.tgz; (5) terraform apply full (Caddy retries ACME until DNS resolves; avoid >5 instance rebuilds/week); (6) verify dig, curl -I, aws ssm start-session + journalctl -u masdr -u caddy, GET /api/health (checks key, sqlite, chromium); (7) redeploy loop: build → s3 cp → aws ssm send-command AWS-RunShellScript '/usr/local/bin/masdr-deploy' → get-command-invocation. Cost ≈ $35/month. Alternative kept in reserve: Lambda arm64 2048 MB + Lambda Web Adapter (response_stream) + Function URL + CloudFront/ACM us-east-1 + presigned S3 uploads; rejected for v1 because Chromium PDF rendering, 10 MB uploads and 90 s streaming jobs add plumbing without functional gain.",
+  "risks": [
+   "Model returns out-of-envelope base values (e.g. 70 cm circumference) — mitigated by rulebook range clamps + assumption logging; residual risk that a clamped default misrepresents a genuinely unusual style (surfaced as a high-impact assumption).",
+   "Structured-output grammar rejects the schema (records, numeric bounds, recursion) — keep llm-schemas.ts flat, enum-driven and byte-stable; CI test calls messages.countTokens with the format to catch schema regressions before demo.",
+   "Zoom tool + output_config.format interaction on Fable 5.1 (forced tool_choice returns 400) — vision stage uses tool_choice auto only; if the API rejects format+tools on any model, fall back to two calls (zoom loop, then parse).",
+   "Opus 5 refusal/429 during the live demo — stop_reason branch → RefusalError → automatic rerun on claude-sonnet-5; SDK maxRetries 3; queue concurrency 3; run 20 warm-up generations to prime the 1 h prompt cache and verify Start-tier limits and purchased credits.",
+   "Latency: draft at effort high can take 40–70 s — streaming progress + SSE replay keep the UI honest; effort per stage is env-tunable; total target <90 s.",
+   "Arabic quality: model translations may be literal or use non-Egyptian vocabulary — glossary in the cached system prompt, script/digit validators, critic scores Arabic; still needs one native review pass before the demo.",
+   "Chromium on EC2: memory spikes and font fallback — t3.medium + swap, single shared browser, bundled fonts, health check renders a 1-page PDF at boot.",
+   "Standalone build/arch mismatch (sharp binaries) — build on WSL2 x86_64 for an x86_64 instance; masdr-deploy runs playwright install chromium on the box.",
+   "Colourway ambiguity (CW1 and CW2 are the same physical hat) — pack states it explicitly and asks one SKU vs two; evaluators may expect two style numbers; expose as a pre-generation option.",
+   "Correctness of industry defaults themselves (ease 1 cm, taper, brim 6.5) — rulebook values cite sources and are marked 'default' with medium confidence; a factory can override in the XLSX and the web editor re-derives.",
+   "Vitest golden run depends on live API — gate it behind ANTHROPIC_API_KEY presence and keep pure geometry/validator tests offline.",
+   "AWS deployer identity and GoDaddy record are outside my control — deploy is the last phase; local acceptance on the golden run happens first."
+  ],
+  "differentiators": [
+   "Every graded number is computed, not generated: head circumference drives the whole chart and each POM prints its formula (D = H/π, F = A + 2πC) — no surveyed competitor does this.",
+   "Four correctness gates (Zod grammar, deterministic validators, independent-model critic, bounded repair with convergence guard) with the reports embedded in the pack.",
+   "Per-row provenance and confidence chips (measured / stated / derived / default / inferred) plus an assumptions & open-questions page — competitors bury a one-line disclaimer.",
+   "Parametric SVG flats bound to POM values with numbered leaders, so drawing and table cannot disagree; validator enforces anchor ↔ chart bijection.",
+   "Real operation sheet (301 lockstitch, SPI, SA, Tex, needle, reversible bag-out sequence, which thread colour on which face) instead of prose 'construction notes'.",
+   "Consumption math per colour with marker efficiency, shrinkage and width, plus run totals — only 3D suites do this.",
+   "Colourway matrix per component with Pantone TCX + hex and the explicit same-hat flag for the reversible case.",
+   "Bilingual EN/AR by design: Arabic gloss on every heading, POM, op and BOM line, ES 7266-compliant bilingual care/content/origin label block, RTL-correct PDF via Chromium.",
+   "PDF + XLSX (with live regrade formulas and factory comment column) + JSON, all free in the prototype; XLSX is a paid tier elsewhere.",
+   "Factory-readiness score from top rejection causes, QC/AQL block and factory acknowledgement block; per-stage cost/latency shown for transparency.",
+   "Slots into Masdr's flow as the step before 'Chat & request quotes', with the marketplace's own visual identity."
+  ],
+  "effort_estimate_days": 9
+ },
+ {
+  "name": "Masdr Tech Pack — AI Tech Pack Generator (demo-impact-first architecture)",
+  "summary": "Single Next.js 16 (App Router, TypeScript, Tailwind v4) service on one EC2 instance behind Caddy at https://masdr-proto.thegentek.com. Photo/sketch + text -> POST /api/jobs returns a job id in <200 ms; an in-process bounded queue runs a prompt-chained pipeline (Opus 5 vision -> two parallel Opus 5 structured draft calls -> code-derived geometry/consumption/flats -> code validators -> Sonnet 5 factory critique -> <=2 Opus 5 repairs) while the browser watches an SSE stream that lights up stage cards AND progressively reveals tech-pack sections as the model's JSON streams (partial-JSON parsing), so the evaluator sees the BOM appear ~15 s in rather than a spinner for 70 s. Every graded number (S/M/L POMs, tip diameter, brim circumference, pattern-piece cut dims, metres/grams per colour, run totals) is computed in code from head circumference with its formula stored next to it; the model only proposes base-size intent with provenance (measured/stated/derived/default/inferred) and confidence, both surfaced as chips in the UI, PDF and XLSX. Pack view is Masdr-branded (indigo #251670/#5F50BC, cream #F8F6F1, pill buttons, VERIFIED/LOW MOQ badges), instant EN/AR toggle with RTL + Cairo, inline edit of base-size M that regrades S/L live and bumps the revision log, a 15-point factory-readiness score, and pre-rendered PDF (Chromium, Arabic shaped correctly), XLSX (exceljs with live grading formulas) and JSON exports that download instantly. Persistence is SQLite (node:sqlite, WAL) + local disk on gp3 with daily EBS snapshots and S3 backup; deploy is Terraform 1.15 (EC2 t4g.medium, EIP, instance profile, SSM, S3, cloud-init) with a zip -> S3 -> SSM RunCommand loop, no Docker and no SSH. About 4.3k lines of this already exist in prototype/app (pipeline, schema, geometry, rulebook, parametric SVG flats, PDF/XLSX/JSON export, SSE, SQLite store, Masdr theme, EN/AR strings, 10 vitest tests); the remaining work is the streaming section reveal, parallel draft split, provenance/formula UI polish, PDF cover and page design, export pre-rendering, golden-run eval, and the infra/ + DEPLOY.md path.",
+  "stack": [
+   "Runtime: Node.js 22.19 + pnpm 10.33 (packageManager pinned); Python 3.14 unused except optional eval scripts",
+   "Web: Next.js 16.3.4 App Router (output: standalone), React 19.2, TypeScript 5, Tailwind CSS v4 with Masdr tokens in globals.css (@theme inline), next/font/google for Inter, Manrope, Cairo, Geist Mono (self-hosted at build time, no runtime fetch)",
+   "AI: @anthropic-ai/sdk 0.123.0, zodOutputFormat from @anthropic-ai/sdk/helpers/zod, client.messages.stream() + finalMessage(), thinking {type:'adaptive'}, output_config {effort, format}, system prompt cache_control ephemeral ttl 1h; models claude-opus-5 (vision, draft, repair) and claude-sonnet-5 (critique, refusal fallback); optional beta server-side fallbacks 'default' with header server-side-fallback-2026-07-01 on Opus 5 calls; ANTHROPIC_MODEL_PRIMARY env allows an A/B with claude-fable-5-1",
+   "Schemas: Zod 4.5 for LLM output contracts (llm-schemas.ts: VisionObservation, TechPackDraft, CritiqueOutput) and the canonical TechPack document (techpack/schema.ts); constraints honoured: no numeric min/max, no records in LLM schemas, enums for stitch/SPI/Tex/size codes",
+   "Streaming UX: Server-Sent Events route /api/jobs/[id]/events with 15 s heartbeat and history replay; partial-json (npm, parse(text, ALL)) on the server to emit section-level 'draft_section' events as the structured output streams",
+   "Images: sharp 0.34 (EXIF rotate, flatten, resize <=1568 px long edge, JPEG q90)",
+   "Geometry/rulebook: pure TypeScript modules src/lib/rulebook/bucket_hat.ts (numbers, tolerances, POM names EN/AR, 14-step op sheet, labels, packaging, QC, Pantone refs), src/lib/geometry/bucket_hat.ts (grading, pattern pieces, consumption), src/lib/flats/bucket_hat.ts (parametric SVG, mm viewBox, <g id='pom-X'> anchors)",
+   "Exports: Playwright 1.62.1 bundled Chromium (headless, --no-sandbox) rendering /packs/[id]/print?lang= to A4 landscape PDF with footer template; exceljs 4.4 workbook (Cover, POM_Spec with formulas, BOM, Construction, Colorways, Consumption, Labels_QC, Revision_Log; rightToLeft view for AR); JSON = TechPack document",
+   "Persistence: node:sqlite DatabaseSync (jobs, packs tables, WAL) in DATA_DIR/masdr.sqlite; DATA_DIR/uploads and DATA_DIR/exports on disk; @aws-sdk/client-s3 optional nightly backup of DATA_DIR to s3://masdr-proto-data-<acct>/backup/",
+   "Queue: in-process bounded queue (JOB_CONCURRENCY=3) as globalThis singleton; jobs table is the durable record so a refresh never loses a result",
+   "Access: optional ACCESS_CODE gate via src/proxy.ts cookie check; Caddy request_body max_size 20MB",
+   "Tests: vitest 3.2 (tests/geometry.test.ts, tests/validate.test.ts) plus a golden-run script scripts/golden.ts against public/examples/masdr_bucket_hat.png writing docs/EVAL.md; Playwright smoke test of upload -> pack -> exports",
+   "Infra: Terraform 1.15 (aws provider, S3 backend with use_lockfile), Ubuntu 24.04 arm64 AMI via SSM parameter, cloud-init user-data, Caddy 2 (auto TLS), systemd unit masdr.service, SSM Session Manager + RunCommand, S3 bucket for releases/backups, SSM Parameter Store SecureString for ANTHROPIC_API_KEY, aws_dlm_lifecycle_policy daily snapshots, aws_budgets_budget $40 alert"
+  ],
+  "pipeline_stages": [
+   {
+    "name": "0 normalize",
+    "kind": "code",
+    "model": "n/a (sharp)",
+    "effort": "n/a",
+    "input": "Uploaded JPEG/PNG/WebP (<=12 MB) + form fields (description <=4000 chars, brand, style no., season, run quantity, target market)",
+    "output": "1568 px max JPEG buffer (EXIF-rotated, flattened), sha256 image hash, job row status=running; SSE stage event",
+    "why": "Keeps vision cost at ~1.3-1.5K image tokens, strips orientation surprises, and gives a stable hash for demo replay/caching"
+   },
+   {
+    "name": "1 vision observation",
+    "kind": "llm",
+    "model": "claude-opus-5",
+    "effort": "medium",
+    "input": "Image block (base64 JPEG) + buyer description; byte-stable VISION_SYSTEM prompt; zodOutputFormat(VisionObservation); max_tokens 8000; thinking adaptive",
+    "output": "VisionObservation: product_family enum, input_kind, panels_observed, brim {present,width_class,topstitch_rows}, crown {height_class,shape}, colours[] with hex estimates, text_in_image verbatim, reversible_evidence, construction_cues, attribute_confidence[], overall_confidence. Emitted to the browser immediately as a 'What the AI saw' card with confidence chips",
+    "why": "Separates observation from generation so the model cannot smuggle invented measurements past the image; the printed spec line on the reference image is captured verbatim; confidence per attribute feeds provenance later"
+   },
+   {
+    "name": "2 merge + route",
+    "kind": "code",
+    "model": "n/a",
+    "effort": "n/a",
+    "input": "VisionObservation + description text",
+    "output": "templateId ('bucket_hat' if product_family=bucket_hat or /bucket hat/i in text, else 'generic'), ProductBrief string with TEMPLATE/BUYER DESCRIPTION/BRAND/STYLE/SEASON/MARKET/RUN QTY lines; conflicts between text and image recorded as assumptions (text wins)",
+    "why": "Deterministic routing decides which rulebook, geometry module and flat template apply; text-wins rule is explicit and auditable"
+   },
+   {
+    "name": "3a draft-core (parallel with 3b)",
+    "kind": "llm",
+    "model": "claude-opus-5",
+    "effort": "high",
+    "input": "System: DRAFT_SYSTEM_STABLE + serialized BUCKET_HAT_RULEBOOK with cache_control {ephemeral, ttl 1h}; user: ProductBrief + VisionObservation JSON; zodOutputFormat(DraftCore = header, product EN/AR, sizes, hat_base_intent {inner_circumference, crown_height, brim_width, band_taper, topstitch_offset, topstitch_rows, crown_height_grade each {value, source, confidence, note}} | generic_poms, bom[], colorways[], colorway_note); streamed; max_tokens 24000",
+    "output": "DraftCore JSON; text deltas parsed with partial-json every ~800 chars and emitted as SSE 'draft_section' events (header -> product -> bom -> colorways) so the pack page renders sections progressively",
+    "why": "The model contributes intent, prose, BOM and colour references only; all base-size numbers carry provenance and are range-checked in stage 4. Splitting the draft into two parallel calls cuts wall-clock ~35-40% and gives the progress UI two moving bars"
+   },
+   {
+    "name": "3b draft-production (parallel with 3a)",
+    "kind": "llm",
+    "model": "claude-opus-5",
+    "effort": "high",
+    "input": "Same cached system prompt; same ProductBrief + observation; zodOutputFormat(DraftProduction = construction {standards, operations[] with step/machine/stitch/spi EN/AR, sam_estimate, special_notes}, labels[], packaging, qc, assumptions[] with impact, questions_for_factory[]); BOM refs prescribed by rulebook convention (F1 khaki twill, F2 black twill, T1/T2 thread, L1-L4 labels, P1 polybag) so cross-references stay consistent without waiting for 3a; streamed; max_tokens 24000",
+    "output": "DraftProduction JSON; sections emitted progressively (construction -> labels -> qc -> assumptions)",
+    "why": "Operation sheet, labels (ES 7266 Arabic care/content/origin), QC/AQL and open questions are the factory-recognised parts competitors reduce to prose; isolating them in their own call keeps each schema small enough for reliable structured output"
+   },
+   {
+    "name": "4 derive geometry, consumption, flats",
+    "kind": "code",
+    "model": "n/a",
+    "effort": "n/a",
+    "input": "Merged draft (3a+3b) + rulebook",
+    "output": "hat_base_intent range-checked (A 50-66, B 6-14, C 3-10, taper 0-6, G 0.2-2, rows 1-6; out-of-range -> rulebook default + assumption); deriveBucketHatPoms: A = M inner circ +/-2 cm per size, B = crown +/-0.5, C brim constant, H = A - taper, D = H/pi, E = B + C, F = A + 2*pi*C, G topstitch offset; tolerances A 1.0 / B 0.5 / C 0.3 / D 0.5 / E 0.5 / F 1.5 / G 0.1 / H 0.5 cm; derivation string per POM; patternPiecesForBase (tip circle D+2SA, band trapezoid, brim half-annulus radii) with net cm2; computeConsumption (net/0.62 marker eff, / usable width 147 cm, x1.03 shrinkage, gsm -> grams, run totals per colour); bucketHatFlats side/top/underside SVG in mm with pom-X anchors",
+    "why": "SO-Bench-style evidence: models hit ~97% schema validity but <12% exact numeric match on image->JSON, so every number an evaluator will check (2 cm grade, D consistent with H, F consistent with A and C, metres per colour) is computed and shown with its formula"
+   },
+   {
+    "name": "5 validate + readiness score",
+    "kind": "code",
+    "model": "n/a",
+    "effort": "n/a",
+    "input": "Assembled PartialPack",
+    "output": "validation {errors[], warnings[]}: >=3 sizes, base marked, monotonic POMs, tolerance>0, every POM anchored in an SVG (id='pom-X' must exist), D~H/pi within 0.15, F~A+2piC within 0.3, H<A, uniform grade, BOM has fabric/thread/label, fabric has gsm+width, qty>0, stitch/SPI/SA present, >=5 ops, colorways with #hex and TCX, labels present incl. care/content/origin, AQL stated, consumption computed; readinessChecklist -> 15 checks, score 0-100",
+    "why": "Code errors become 'blocking' repair issues; the readiness score is the single number an evaluator can compare across vendors"
+   },
+   {
+    "name": "6 factory critique",
+    "kind": "llm",
+    "model": "claude-sonnet-5",
+    "effort": "low",
+    "input": "CRITIQUE_SYSTEM (Egyptian factory production manager persona) + pack JSON with SVGs stripped + validation result; zodOutputFormat(CritiqueOutput); max_tokens 6000",
+    "output": "CritiqueReport {factory_readiness_score, verdict pass|repair, issues[{section, issue, fix, severity blocking|warning}], strengths[]}; stored in pack.pipeline.critique and shown in the Readiness section; failure here is non-fatal (stage recorded as skipped)",
+    "why": "Cheap second opinion from a different model catches missing tolerances, colours by name only, ambiguous reversible construction and untranslatable Arabic; runs in ~8-12 s"
+   },
+   {
+    "name": "7 repair (bounded, max 2)",
+    "kind": "llm",
+    "model": "claude-opus-5",
+    "effort": "medium",
+    "input": "Cached draft system prompt + REPAIR_SYSTEM_SUFFIX; current merged draft JSON + issues (critique blocking + code validation errors); same DraftCore/DraftProduction schemas; streamed",
+    "output": "Revised draft -> rerun stages 4-5; loop exits when zero code errors and zero blocking issues, or after 2 iterations (then flagged 'needs human review' in the pack and UI)",
+    "why": "Only runs when something is actually blocking, so the happy path stays ~60-75 s; bounded so the demo can never spin"
+   },
+   {
+    "name": "8 finalize + persist",
+    "kind": "code",
+    "model": "n/a",
+    "effort": "n/a",
+    "input": "PartialPack + readiness + stage telemetry",
+    "output": "TechPack.parse() document v1.0 with pipeline {stages[{name, kind, model, ms, tokens, cache_read, cost_usd}], critique, validation, total_cost_usd, total_ms}; INSERT into packs; job status=complete; SSE 'complete' {packId}; browser auto-navigates to /packs/[id]",
+    "why": "Per-stage cost and timing are shown in the UI footer (typ. $0.35-0.55, 60-90 s) which is itself a credibility signal for evaluators"
+   },
+   {
+    "name": "9 pre-render exports (background)",
+    "kind": "code",
+    "model": "n/a",
+    "effort": "n/a",
+    "input": "Finalized pack id + version",
+    "output": "DATA_DIR/exports/<packId>/v1-0/{en.pdf, ar.pdf, pack.xlsx, pack.json} rendered by Playwright Chromium + exceljs right after completion; export route serves the cached file when the version matches, else renders on demand",
+    "why": "Export buttons respond instantly during the 3-minute demo instead of a 6-10 s Chromium render on click"
+   },
+   {
+    "name": "10 human review + edit (regrade in code)",
+    "kind": "human",
+    "model": "n/a",
+    "effort": "n/a",
+    "input": "Buyer edits in the pack view: base-size M values for A/B/C/G/H, product description EN/AR, BOM rows, colorway components, assumptions",
+    "output": "PATCH /api/packs/[id] -> applyPackEdit: re-derives S/L POMs, pattern pieces, consumption and flats from the edited M values, marks edited values source=stated confidence=high, revalidates, rescores, bumps version 1.0 -> 1.1, appends revision_log entry, invalidates and re-renders exports",
+    "why": "Editability with provenance is a listed differentiator; the evaluator can change M circumference to 60 and watch S/L, tip diameter, brim circumference and metres per colour update with formulas intact"
+   },
+   {
+    "name": "11 handoff to factories (mocked)",
+    "kind": "code",
+    "model": "n/a",
+    "effort": "n/a",
+    "input": "Finalized pack",
+    "output": "'Send to verified factories for quotes' modal listing 3 masked Cairo/Giza headwear factories with VERIFIED / LOW MOQ / READY TO SHIP badges and MOQ; confirms with a toast; JSON export is the RFQ payload shape",
+    "why": "Positions the tool as Step 2 in Masdr's existing Search -> Chat & request quotes -> Produce flow"
+   }
+  ],
+  "techpack_schema_outline": "TechPack (Zod, src/lib/techpack/schema.ts; every *_en string has an *_ar twin; numbers/units/POM codes stay Latin):\n- meta {id, version '1.0'.., created_at, updated_at, template_id 'bucket_hat'|'generic', generator {primary_model, pipeline_version}}\n- header {style_number, style_name_en/ar, brand, season, category_en/ar, product_type_en/ar, base_size 'M', units 'cm', date, status draft|reviewed|approved}\n- product {description_en/ar, intended_use_en/ar, fit_intent_en/ar, key_features_en[]/ar[], reference_observations_en[] (from vision: silhouette notes, construction cues, verbatim text on image)}\n- sizes[] {code S|M|L, label_en/ar, fits_note_en 'Fits head 57-58 cm', is_base}\n- poms[] {code A..H, name_en/ar, how_to_measure_en/ar, values {S,M,L}, tolerance_cm, derivation 'F = A + 2*pi*C', source measured|stated|derived|default|inferred, confidence high|medium|low}\n- pattern_pieces[] {name_en/ar, qty_per_shell, qty_total, cut_dimensions_base_en, notes_en incl. net cut area cm2}\n- bom[] {ref F1/F2/T1/T2/L1..L4/P1, category fabric|interfacing|thread|label|trim|hardware|packaging|other, item_en/ar, description_en, composition, weight_gsm, width_cm, placement_en/ar, qty_per_unit, unit, colour_rule_en, supplier 'TBC by factory', notes_en, source, confidence}\n- construction {standards {stitch_type '301 lockstitch (ISO 4915)', seam_type, spi_seam '10-12', spi_topstitch '8-9', seam_allowance_cm 1.0, topstitch_offset_cm 0.6, topstitch_rows 1, needle 'DBx1 Nm 80-90', thread_seaming 'Tex 27-30 core-spun poly', thread_topstitch 'Tex 40', interfacing_en, pressing_en}, operations[] {step, operation_en/ar, machine, stitch, spi, notes_en/ar} (14 steps incl. reversible bag-out, turning gap, single brim topstitch closing gap, stitch-in-ditch tacks), sam_estimate_min, sam_note_en, special_notes_en[]/ar[]}\n- colorways[] {code CW1/CW2, name_en/ar, components[] {component_en/ar (outer shell, reverse shell, brim topstitch needle/bobbin, label), colour_name, pantone_tcx '16-0726 TCX', hex '#A39264', bom_ref}, thread_needle, thread_bobbin, label_side_en/ar, notes_en}; colorway_note_en/ar (states CW1 and CW2 are the same physical hat, differentiated by label side/hangtag)\n- labels[] {type, placement_en/ar, content_en/ar (bilingual fibre %, Made in Egypt / صنع في مصر, ISO 3758 symbols, ES 7266-3 note), notes_en}\n- packaging {method_en/ar, items_en[], carton_note_en 'TBC by factory'}\n- qc {aql_en 'ISO 2859-1 GII, AQL 2.5 major / 4.0 minor', checks_en[]/ar[], tests_en[] (gsm +/-5%, shrinkage <=3%, colourfastness wash/rub)}\n- consumption {fabric_width_cm, usable_width_cm, marker_efficiency, shrinkage_allowance_pct, per_unit[] {colour, net_area_cm2, gross_area_cm2, metres_per_unit, grams_per_unit}, formulas_en[], run_quantity, run_totals_m[]}\n- flats[] {id side|top|underside, title_en/ar, svg (mm viewBox, <g id='pom-X'> badges + leaders), pom_codes[]}\n- assumptions[] {text_en/ar, impact low|medium|high}; questions_for_factory[] {text_en/ar}\n- readiness {score 0-100, checks[15] {item_en, pass, note_en}}\n- revision_log[] {version, date, author, change_en}\n- pipeline {stages[] {name, kind llm|code, model, ms, input_tokens, output_tokens, cache_read_tokens, cost_usd, note}, critique CritiqueReport|null, validation {errors[], warnings[]}, total_cost_usd, total_ms}\n- exports (to add) {version, pdf_en, pdf_ar, xlsx, json, rendered_at}\nLLM-facing schemas (llm-schemas.ts) are strict subsets: VisionObservation, DraftCore, DraftProduction (split of TechPackDraft), CritiqueOutput; nullable instead of optional, enums for families/categories/severity, no records, no numeric bounds.",
+  "ui_flow": [
+   "1. Landing (/): dark indigo radial-glow hero inside a 20 px rounded container, MASDR wordmark, headline 'Turn a sketch into a factory-ready tech pack', locale pill 'Egypt (EN/EGP)' / 'مصر (عربي/جنيه)' toggling lang cookie + dir=rtl + Cairo font instantly; 3-step strip (Upload -> Generate -> Send to verified factories).",
+   "2. Generate form (same page): white rounded-24 dropzone with preview, description textarea, brand / style no. / season / run qty / target market; 'Use the example (reversible bucket hat)' button loads public/examples/masdr_bucket_hat.png and the canonical description so the demo is one click; submit -> POST /api/jobs -> 202 {jobId} -> router.push(/jobs/[id]).",
+   "3. Progress (/jobs/[id]): EventSource on /api/jobs/[id]/events; 9 stage cards (normalize, vision, route, draft-core, draft-production, assemble+validate, critique, repair-n, complete) with dot states, per-stage seconds and $ cost; percent bar; 'What the AI saw' card appears after vision with product type, colours as swatches, verbatim text found on the image, confidence chips; below it a live 'Draft preview' area where sections (Header, Product, BOM, Colorways, Construction, Labels, QC, Assumptions) fill in as partial JSON arrives; on 'complete' auto-navigates after 0.9 s; refresh-safe because history replays from the server.",
+   "4. Pack view (/packs/[id]): sticky section nav + Export PDF / XLSX / JSON buttons + orange CTA 'Send to verified factories'; Cover panel with reference photo, colorway swatch tiles (Pantone TCX + hex), readiness score ring and version/date; Product; Technical flats (three parametric SVGs with numbered POM badges, hover highlights the matching row in the spec table); Graded spec chart S/M/L with tolerance column, provenance chip per row (measured / stated / derived / default / inferred) and an info icon showing the formula; Pattern pieces + consumption with the formulas printed and run totals per colour; BOM; Construction standards + 14-step operation sheet; Colorways matrix with the same-physical-hat note; Labels & packaging (bilingual care label preview); QC/AQL; Assumptions & questions for the factory; Factory-readiness checklist (15 checks) and critique strengths/issues; Revision log; pipeline footer with total time and cost.",
+   "5. Edit: 'Edit M' on the spec chart turns base-size cells into inputs; Save -> PATCH -> S/L, D/E/F/H, pattern pieces, consumption and SVG flats regrade live, version bumps to 1.1, revision log row added, toast 'Saved v1.1'; product description EN/AR editable inline; BOM row and colorway component edits use the same PATCH path.",
+   "6. EN/AR toggle on the pack page re-renders with dir=rtl, Cairo font, Arabic glosses primary and English secondary; numbers, units and POM codes stay Latin; PDF export respects the active language (?lang=ar).",
+   "7. Exports: buttons download BRAND-STYLE_TP_v1-1_2026-09-02.pdf/.xlsx/.json from the pre-rendered cache (instant) or on-demand render; PDF opens with cover, flats page, spec page, BOM, construction, colorways, labels/QC, assumptions, revision log, footer with version and page numbers.",
+   "8. Handoff: 'Send to verified factories' modal lists 3 masked matching factories with VERIFIED / LOW MOQ / READY TO SHIP badges and MOQ; 'Request quotes' shows a toast (mocked) and marks the pack status reviewed.",
+   "9. History (/packs): list of generated packs with style, version, date for returning to earlier runs during the demo; optional /access page when ACCESS_CODE is set."
+  ],
+  "export_strategy": "One source of truth renders three ways. PDF: the print route /packs/[id]/print?lang=en|ar reuses the same React section components as the web view with print CSS (@page A4 landscape, break-after per section, .no-print hidden, isolated dir=rtl lang=ar spans, unicode-bidi isolate); src/lib/export/pdf.ts keeps one headless Chromium (Playwright 1.62.1 bundled build, --no-sandbox, --disable-dev-shm-usage) alive on globalThis, opens a context with locale ar-EG or en-GB and deviceScaleFactor 2, injects the access cookie if gating is on, waits for networkidle + document.fonts.ready, then page.pdf({format:'A4', landscape:true, printBackground:true, preferCSSPageSize:true, margins 10/12 mm, footer 'Masdr Tech Pack · title · page n / N'}); Arabic shaping and the SVG flats are therefore identical to the browser. Page order v1: cover (style, brand, season, version, date, colorway thumbnails, readiness score, QR to the live pack) -> product description + reference photo -> flats with callouts -> graded spec chart -> pattern pieces + consumption with formulas -> BOM -> construction standards + op sheet -> colorways -> labels & packaging -> QC -> assumptions & questions -> revision log. XLSX: exceljs workbook with sheets Cover, POM_Spec (base-size column holds values; S and L cells are formulas =M-2 / =M+2 for A, =H/PI() for D, =A+2*PI()*C for F, =B+C for E so editing M in Excel regrades; tolerance column; factory-comment column with data-validation list OK/Adjust/Query), Pattern_Consumption, BOM, Construction (ops), Colorways, Labels_QC, Assumptions, Revision_Log; Masdr header fill #251670, alternating #F1F4F6 rows, A4 landscape fitToPage, flats embedded as PNG via Playwright screenshot of the SVG, views rightToLeft only when lang=ar. JSON: the canonical TechPack document (Zod-validated) served as application/json, which doubles as the RFQ payload for the marketplace. File naming <BRAND>-<STYLE>_TP_v<maj-min>_<YYYY-MM-DD>.<ext>; Content-Disposition attachment. Exports are pre-rendered in the background at pipeline completion and after every PATCH into DATA_DIR/exports/<packId>/<version>/ and served from cache when the version matches; on-demand render is the fallback; export errors return JSON {error} with a toast rather than a blank tab.",
+  "hosting": "AWS eu-west-1 (client decision) — one EC2 t4g.medium (2 vCPU / 4 GiB Graviton, Ubuntu 24.04 arm64 AMI from SSM parameter /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id; 4 GiB chosen because Next.js + headless Chromium + 3 concurrent generations exceed 2 GiB), gp3 30 GB root, IMDSv2 required, Elastic IP, default VPC/subnet, security group 80/443 in (v4+v6) and no 22, instance profile with AmazonSSMManagedInstanceCore + inline s3:Get/Put/List on the app bucket + ssm:GetParameter on /masdr-proto/*, S3 bucket masdr-proto-data-<acct> (public access blocked, SSE-S3, lifecycle 30 d on releases/ and backup/), SSM SecureString /masdr-proto/ANTHROPIC_API_KEY (written with aws ssm put-parameter, never in state), aws_dlm_lifecycle_policy daily EBS snapshot (7 kept), aws_budgets_budget alert at $40/month; ~$30/month all-in. Caddy 2 on the box terminates TLS for masdr-proto.thegentek.com (Let's Encrypt with ZeroSSL fallback), Caddyfile: encode gzip; request_body max_size 20MB; reverse_proxy 127.0.0.1:3000 with flush_interval -1 so SSE streams; optional basic_auth left off because the app has ACCESS_CODE gating. App runs as systemd masdr.service (User=masdr, WorkingDirectory=/opt/masdr/current, EnvironmentFile=/etc/masdr/env with PORT=3000, DATA_DIR=/var/lib/masdr, INTERNAL_BASE_URL=http://127.0.0.1:3000, JOB_CONCURRENCY=3, ANTHROPIC_MODEL_PRIMARY/FAST, ANTHROPIC_API_KEY pulled from SSM at boot by /usr/local/bin/masdr-env; ExecStart=/usr/bin/node .next/standalone/server.js; Restart=always). Exact deploy path (all from WSL2, no Docker, no SSH): (0) admin creates IAM user masdr-proto-deployer with the EC2/IAM-passrole/SSM/S3/DLM/Budgets policy in docs/DEPLOY.md, aws configure --profile masdr, export AWS_PROFILE=masdr AWS_REGION=eu-west-1, install session-manager-plugin; (1) infra/terraform: backend s3 {bucket=<state bucket>, key=masdr-proto/terraform.tfstate, region=eu-west-1, encrypt=true, use_lockfile=true}; terraform init; terraform apply -target=aws_eip.app -> output EIP; (2) client adds GoDaddy A record masdr-proto -> EIP, TTL 600 (host, value, TTL supplied by me); (3) aws ssm put-parameter --name /masdr-proto/ANTHROPIC_API_KEY --type SecureString --value ...; (4) terraform apply (full) — cloud-init (<16 KB): apt nodejs 22 via NodeSource, corepack enable pnpm@10.33.4, caddy from cloudsmith repo, awscli, unzip, fonts-noto-core fonts-noto-color-emoji, then npx playwright install-deps chromium prerequisites (libnss3 libatk-bridge2.0-0 libxkbcommon0 libgbm1 libasound2t64 ...), useradd masdr, write Caddyfile, systemd unit, masdr-env and masdr-deploy scripts, systemctl enable --now caddy masdr, unattended-upgrades; (5) release loop: pnpm build locally only for type/lint check, then zip source (git-tracked files, no node_modules/.next) -> aws s3 cp release.zip s3://masdr-proto-data-<acct>/releases/latest.zip -> aws ssm send-command --document-name AWS-RunShellScript --targets Key=tag:Name,Values=masdr-proto --parameters commands=[/usr/local/bin/masdr-deploy] — the script unzips to /opt/masdr/releases/<ts>, runs pnpm install --frozen-lockfile, pnpm exec playwright install chromium, pnpm build (builds on arm64 so sharp/Chromium binaries match), copies .next/static and public into .next/standalone, symlinks /opt/masdr/current, systemctl restart masdr, curls /api/health; poll with aws ssm get-command-invocation; (6) verify: dig +short masdr-proto.thegentek.com, curl -I https://masdr-proto.thegentek.com/api/health, aws ssm start-session --target <id> then journalctl -u masdr -u caddy -n 200; (7) before the demo: run scripts/warm.ts (3 generations on the reference image) to prime the 1 h prompt cache and surface refusals, confirm Console credits/Start-tier limits. Rollback = re-point the symlink to the previous release and restart. Lambda + Function URL (RESPONSE_STREAM) + CloudFront remains the documented alternative but is not chosen: Chromium PDF rendering needs a container image and the 30-120 s CloudFront origin timeout complicates 90 s generations.",
+  "risks": [
+   "Demo-time latency: two Opus 5 draft calls at effort high plus critique can reach 90-120 s on a slow day; mitigations: parallel split, progressive section reveal so the screen is never idle, 1 h prompt-cache TTL primed by scripts/warm.ts, and an explicit ANTHROPIC_DRAFT_EFFORT env to drop to medium if p50 > 90 s in rehearsal.",
+   "API failure during the live demo (429, 5xx, refusal): SDK maxRetries 3 with backoff, RefusalError -> automatic retry on claude-sonnet-5, optional server-side fallbacks 'default' beta on Opus 5, and a clearly labelled 'Replay cached run' button on the landing page that loads the golden pack for the reference image (badge says cached, never presented as live).",
+   "Org still on Evaluation tier or low credits: confirm purchased credits and Start-tier limits (1,000 RPM / 2M ITPM) 48 h before; usage and cost per stage are logged in pack.pipeline to prove the ~$0.35-0.55 per pack figure.",
+   "Structured-output drift: partial-JSON section reveal can show a half-written section; guard by only emitting a section once its closing brace has parsed and by treating the final zod.parse as the source of truth; schemas stay byte-stable so the grammar cache hits.",
+   "Arabic quality: model-written Arabic glosses may use non-Egyptian factory vocabulary; the rulebook fixes the canonical terms (حياكة زخرفية, بدل الخياطة, محيط الرأس, الحزام, الحافة, القمة) and a native reviewer should proofread the golden output before the demo; PDF relies on Chromium + Cairo so shaping is not a risk, but fonts must be present on the box (fonts-noto-core installed by cloud-init as fallback).",
+   "Chromium on t4g: headless Chromium + Next.js on Graviton needs the apt dependency list exactly right; deploy script runs pnpm exec playwright install --with-deps chromium and /api/health reports a PDF self-test; if it fails, exports fall back to XLSX/JSON and PDF shows a clear error toast rather than a hang.",
+   "Colorway ambiguity: 'khaki outer / black reverse' and 'black outer / khaki reverse' are the same physical hat; the pack states this explicitly and shows the label-side/hangtag differentiation, but the evaluator may expect two SKUs — a toggle 'one style with two colorway lines (default) vs two style numbers' is exposed in the header edit.",
+   "Generic (non-hat) inputs: only the bucket-hat template has parametric geometry and flats; other product families get model-proposed POMs with grade increments and a high-impact assumption that flats must be supplied — acceptable for the prototype but should be stated in the submission.",
+   "Single-instance state: SQLite + local disk means a terminated instance loses packs unless the daily EBS snapshot and nightly S3 backup ran; do not run terraform destroy/apply on the instance more than a few times per week (Let's Encrypt 5 duplicate certs/week).",
+   "AWS access gating: deployment is blocked until the client's deployer IAM user exists and the GoDaddy A record is added; keep the local dev URL and the golden PDF/XLSX as a fallback demo path.",
+   "IP/branding: using the MASDR wordmark and palette is a client decision (confirmed); do not reuse placeholder /about and /contact content from the live site."
+  ],
+  "differentiators": [
+   "Numbers are derived, not guessed: head circumference drives every graded value (A grade 2 cm, H = A - taper, D = H/pi, F = A + 2*pi*C, E = B + C), with the formula printed beside each POM, pattern-piece cut dimensions and consumption (metres and grams per colour, run totals) — no surveyed competitor does this and evaluators checking the S/M/L arithmetic will find it consistent by construction.",
+   "Provenance and confidence on every AI-influenced value (measured from image / stated by buyer / derived by formula / rulebook default / inferred) shown as chips in the web view, PDF and XLSX, plus an 'Assumptions and questions for the factory' section with impact levels.",
+   "Factory-ready content, not prose: 14-step operation sheet with machine, ISO 4915 stitch, SPI, seam allowance, thread Tex and needle Nm per step, explicit reversible bag-out sequence, tolerances per POM, Pantone TCX + hex for every colour, bilingual ES 7266-compliant care/content/origin label, packaging spec, ISO 2859-1 AQL 2.5/4.0 QC block and test list.",
+   "Bilingual EN/AR throughout with correct RTL, Cairo font, Egyptian factory vocabulary, Latin digits for all numbers/units, and Arabic-shaped PDF rendering via Chromium — absent from every surveyed AI tech-pack tool.",
+   "Three free exports from one source of truth: A4 PDF with cover and callout flats, XLSX whose S/L cells are live formulas off M, and machine-readable JSON — competitors gate Excel behind $48-130/month tiers.",
+   "Parametric SVG technical flats (side, top, underside) drawn from the actual POM values with numbered callouts bound to the spec table, so drawing and numbers cannot disagree; validators fail the pack if a POM has no sketch anchor.",
+   "Editable with automatic regrade and a revision log: change M and S/L, tip diameter, brim circumference, pattern pieces, consumption and the flats update; version bumps and exports re-render.",
+   "Visible quality loop and honesty: factory-readiness score (15 checks), Sonnet 5 critique with strengths/issues, bounded repair, and 'TBC by factory' placeholders instead of invented supplier or carton data.",
+   "Demo polish matching Masdr: real palette, pill buttons, badge colours, locale pill, streaming stage timeline with per-stage seconds and cost, progressive section reveal, and a 'Send to verified factories' handoff that slots into Masdr's existing 3-step flow.",
+   "Correct handling of the reversible-colorway trap: the pack states that both colorways are the same physical hat and specifies how to differentiate them (label side, packaging face, hangtag), which most generators would silently double-count."
+  ],
+  "effort_estimate_days": 7
+ }
+]

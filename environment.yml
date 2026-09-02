@@ -1,0 +1,11 @@
+name: masdr-proto
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pyyaml
+  - requests
+  - openpyxl
+  - pip:
+      - pypdf

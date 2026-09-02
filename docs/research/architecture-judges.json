@@ -1,0 +1,139 @@
+[
+ {
+  "scores": [
+   {
+    "design": "Design 1: Masdr Tech Pack (correctness-first pipeline)",
+    "correctness": 9,
+    "factory_readiness": 7,
+    "demo_impact": 6,
+    "build_risk": 6,
+    "total": 28,
+    "rationale": "Strongest arithmetic and validation story: fixed Pantone dictionary, prose-vs-POM number cross-check, Arabic-script/Latin-digit validators, ES 7266 label presence check, and a repair loop with a strict convergence guard. Marker efficiency 0.80 is optimistic for circular hat pieces (existing code uses 0.62, which a cutting room would believe). Factory readiness is solid (op sheet, Tex, AQL, acknowledgement block) but the document is ordered for evaluators, not for a sample room, and there is no Arabic-first sheet. Demo is a progress timeline with a spinner-ish feel; no progressive reveal or pre-rendered exports. Build risk: its own description undercounts the existing scaffold (2.7k vs 4.3k lines actually present), its schema outline (meta.brand etc.) diverges from the existing header/product shape, the zoom tool combined with output_config.format is an untested API interaction it admits may 400, and 9 days is the longest estimate."
+   },
+   {
+    "design": "Design 2: Masdr Tech Pack — AI Tech Pack Generator (demo-impact-first)",
+    "correctness": 8,
+    "factory_readiness": 7,
+    "demo_impact": 9,
+    "build_risk": 8,
+    "total": 32,
+    "rationale": "Same code-derived grading, provenance and validators as the others, matches the existing 4.3k-line scaffold exactly (header/product schema, edit.ts regrade, pdf/xlsx export, SSE, SQLite all present), and 7 days is the most credible estimate. Parallel draft split is a real latency win but introduces a cross-reference risk between BOM refs (3a) and operations (3b) that is only mitigated by convention. Progressive section reveal, 'What the AI saw' card, pre-rendered instant exports, live regrade of M and the factories-handoff modal give the best 3-minute demo. From the factory chair it is good (14-step op sheet, Tex/needle, ES 7266 label, AQL, same-hat note) but lacks an acknowledgement loop and an Arabic-first cutter/sewer sheet. Arm64 build-on-box is fine but adds deploy time and one more thing that can break; sample-review loop absent."
+   },
+   {
+    "design": "Design 3: Masdr Tech Pack (factory-first edition)",
+    "correctness": 8,
+    "factory_readiness": 9,
+    "demo_impact": 7,
+    "build_risk": 6,
+    "total": 30,
+    "rationale": "This is the pack an Egyptian merchandiser and sample room would actually use: sections in cutting-room order, Arabic-first sample-room sheet (cut sheet + op sheet + POM chart), factory acknowledgement form (sample size, units, tolerances, lot shrinkage, thread availability, lead time), sample-review rounds tied to POM codes with measured-vs-spec deltas, immutable versions, share link/QR, unresolved repair issues surfaced as questions for the factory. Correctness matches Design 2 with the useful cheap Sonnet detail-zoom on sharp crops. Build risk is the weakest: t3.small (2 GiB) with Chromium and 3 concurrent jobs will OOM, it proposes eu-central-1 against the client-confirmed eu-west-1, and adds three new human/LLM stages plus tokenised share pages on top of an 8-day estimate. Demo impact is fine but the extra loops are hard to show in 3 minutes without a second actor."
+   }
+  ],
+  "winner": "Design 2: Masdr Tech Pack — AI Tech Pack Generator (demo-impact-first)",
+  "graft_ideas": [
+   "From Design 3: reorder the pack and PDF into factory order (cover -> flats -> graded POM chart -> cut sheet -> BOM -> op sheet -> colorways -> labels/packaging -> QC -> acknowledgement -> assumptions/questions -> revision log).",
+   "From Design 3: add print mode=sample_room, an Arabic-primary sheet containing only flats, POM chart, cut sheet and operation sheet, as a fourth export button.",
+   "From Design 3: add a factory acknowledgement page (sample size, units, tolerances accepted, lot shrinkage %, thread Tex/colour availability, label supplier, lead time, name/role/date) as a static PDF/XLSX page now, with a simple tokenised /packs/[id]?token= form if time allows.",
+   "From Design 3: when the repair loop exhausts 2 iterations, push the residual issues into questions_for_factory so nothing unresolved is hidden.",
+   "From Design 3: replace the tool-use zoom with a conditional Sonnet 5 detail pass on sharp crops of the original image (topstitch rows, label text), triggered only when vision confidence is not high; no format+tools interaction to worry about.",
+   "From Design 3: per-job cost cap (~$1.50) and immutable pack_versions rows so 'which version did you cut from' has one answer.",
+   "From Design 1: fixed colour dictionary mapping named colours to Pantone TCX + hex in code so the model never invents a Pantone code.",
+   "From Design 1: validator that cross-checks numbers appearing in construction prose ('6 mm', '10-12 SPI') against the G/SA/SPI fields, plus an Arabic-script and Latin-digit check on every _ar twin.",
+   "From Design 1: convergence guard on the repair loop (error count must strictly decrease, else stop and keep the best-scoring build with needs_human_review=true).",
+   "From Design 1: /api/health renders a one-page PDF at boot and a CI test calls messages.countTokens with each zodOutputFormat schema to catch grammar-rejected schema regressions before the demo.",
+   "From Design 1: retry after failure reuses the cached VisionObservation keyed by image sha256 + brief, and range-clamped intent values are logged as high-impact assumptions rather than silently replaced.",
+   "From Design 1: consider t3.medium x86_64 so the WSL2-built standalone bundle deploys without an on-box pnpm build; keep Design 2's build-on-box script only if arm64 is retained."
+  ]
+ },
+ {
+  "scores": [
+   {
+    "design": "DESIGN 1: Masdr Tech Pack (correctness-first pipeline)",
+    "correctness": 9,
+    "factory_readiness": 7,
+    "demo_impact": 6,
+    "build_risk": 6,
+    "total": 28,
+    "rationale": "Strongest correctness story: four explicit gates, a prose-vs-POM number cross-check, Arabic-script/Latin-digit validators, a convergence guard on the repair loop, a fixed Pantone dictionary and range-clamps that log assumptions. Factory content is solid (op sheet, ES 7266 label, AQL, consumption) but stops at the buyer; nothing closes the loop with the factory. Demo is a stage timeline plus a finished pack, no progressive reveal, no instant exports, no visible 'what the AI saw' moment. Build risk is the concern: it describes the scaffold as ~2.7k lines when it is 4,346, quotes marker efficiency 0.80 while the rulebook in the repo uses 0.62 (so its headline 0.22 m/hat is off), and it bets the vision stage on a zoom tool combined with output_config.format, which the design itself flags as possibly rejected by the API. 9 days is the longest estimate."
+   },
+   {
+    "design": "DESIGN 2: Masdr Tech Pack — AI Tech Pack Generator (demo-impact-first architecture)",
+    "correctness": 8,
+    "factory_readiness": 7,
+    "demo_impact": 9,
+    "build_risk": 8,
+    "total": 32,
+    "rationale": "Same code-derived geometry, provenance chips, validators, critic and bounded repair as the others, and it is the only submission that describes the existing scaffold accurately (4.3k lines, 0.62 marker efficiency, existing pdf/xlsx/sqlite/SSE modules), so the remaining work list is credible at 7 days. Demo impact is clearly best: BOM appears ~15 s in via partial-JSON section reveal, 'What the AI saw' card, live regrade when editing M, pre-rendered exports so downloads are instant, a labelled 'Replay cached run' fallback, and the factory-handoff modal that slots into Masdr's flow. Factory readiness matches Design 1 (14-step op sheet, ES 7266 label, AQL) but has no acknowledgement or sample-review protocol. Minor risks: half-written sections from partial JSON (mitigated by closing-brace rule), two parallel Opus draft calls doubling cached-prompt spend, and building on the arm64 box instead of locally; all manageable."
+   },
+   {
+    "design": "DESIGN 3: Masdr Tech Pack (AI Tech Pack Generator, factory-first edition)",
+    "correctness": 8,
+    "factory_readiness": 9,
+    "demo_impact": 7,
+    "build_risk": 5,
+    "total": 29,
+    "rationale": "Best understanding of what an Egyptian merchandiser and sample room actually consume: document ordered flats -> POM chart -> cut sheet -> op sheet, Arabic-first sample-room sheet, factory acknowledgement form (sample size, units, tolerances, lot shrinkage, thread availability, lead time), sample-review rounds tied to POM codes with measured-vs-spec deltas, immutable versions, QR on the cover. The conditional Sonnet detail-zoom on sharp crops is a safer way to get topstitch-row accuracy than Design 1's tool-use loop. But it is the riskiest to ship: 13 stages including two new human/LLM loops, share tokens, three new tables and a 14-page PDF in 8 days; a t3.small (2 GiB) for Next + Chromium, which the design itself admits can OOM; hourly S3 sync instead of snapshots; and it proposes eu-central-1 when the client confirmed eu-west-1. Demo impact is good (the acknowledgement loop is a strong story) but there is no progressive section reveal and the progress page is a plain stage list."
+   }
+  ],
+  "winner": "DESIGN 2: Masdr Tech Pack — AI Tech Pack Generator (demo-impact-first architecture)",
+  "graft_ideas": [
+   "From Design 3: conditional detail-zoom stage on claude-sonnet-5 using sharp crops of the full-resolution original at bboxes returned by the vision stage (max 3, only when confidence != high or topstitch_rows is null or a label region was found). Gets topstitch-row and printed-label accuracy without Design 1's risky tool-use + structured-output combination.",
+   "From Design 3: reorder the pack and PDF into factory order (cover -> flats with callouts -> graded POM chart -> cut sheet/consumption -> BOM -> op sheet -> colorways -> labels/packaging -> QC -> acknowledgement -> assumptions/questions -> revision log) and add a `mode=sample_room` print variant: Arabic-primary, only flats + POM chart + cut sheet + op sheet, for cutters and sewers.",
+   "From Design 3: a factory acknowledgement page (sample size, units, tolerances accepted, lot shrinkage %, thread Tex/colour availability, label supplier, lead time, name/role/date) rendered as a form page in the PDF and XLSX now, with a lightweight read-only share link /packs/[id]?token= and a QR on the PDF cover; persist acknowledgements only if time permits.",
+   "From Design 3: immutable pack_versions table (one JSON row per version) so 'which pack did you cut from' has one answer, plus a per-job cost cap (~$1.50) that aborts runaway repairs.",
+   "From Design 3: when the repair loop exhausts, push the unresolved issues into questions_for_factory and set status draft, rather than only a needs_human_review flag.",
+   "From Design 1: prose-vs-number cross-check validator (any '6 mm', '10-12 SPI', '1 cm SA' mentioned in construction prose must equal the G/SPI/SA fields) and an Arabic validator (every _ar twin non-empty, matches \\p{Script=Arabic}, Latin digits only, rulebook glossary terms present).",
+   "From Design 1: convergence guard on the repair loop, requiring the error count to strictly decrease each iteration, otherwise stop and keep the best-scoring build.",
+   "From Design 1: fixed colour dictionary in code (Khaki 16-0726 TCX #A39264, Jet Black 19-0303 TCX #2D2C2F, etc.) resolved in the merge/route stage, so the model never invents Pantone codes; keep hex_estimate from vision only as a confidence signal.",
+   "From Design 1: /api/health renders a one-page PDF at boot and checks key, SQLite and Chromium; a CI test calls messages.countTokens with each zodOutputFormat schema to catch grammar-incompatible schema regressions before the demo.",
+   "From Design 1: a pre-generation option 'one style with two colorway lines vs two style numbers' for the reversible-hat SKU question, plus explicit per-row formula tooltips on pattern pieces and consumption, not only POMs.",
+   "From Design 1: keep gp3 20 GB + 2 GB swapfile and daily DLM EBS snapshots, and budget alarm at $40; keep Design 2's t4g.medium 4 GiB rather than Design 3's t3.small."
+  ]
+ },
+ {
+  "scores": [
+   {
+    "design": "Design 1 — Masdr Tech Pack (correctness-first pipeline)",
+    "correctness": 9,
+    "factory_readiness": 8,
+    "demo_impact": 7,
+    "build_risk": 6,
+    "total": 30,
+    "rationale": "Strongest correctness story: prose-vs-POM number cross-check, Arabic-script/Latin-digit validators, fixed Pantone dictionary, range clamps logged as assumptions, and a repair loop with a strict convergence guard. But it underestimates what already exists (cites ~2.7k lines; the scaffold is 4.3k with pipeline, edit, exports, SSE already in place), adds a zoom tool-use loop inside the vision call whose interaction with output_config.format is an acknowledged unknown, has no progressive section reveal (70 s of stage dots), renders exports on click (6-10 s Chromium hit mid-demo), and self-estimates 9 days for a 7-day window. x86_64 t3.medium build parity is the right call."
+   },
+   {
+    "design": "Design 2 — Masdr Tech Pack (demo-impact-first architecture)",
+    "correctness": 8,
+    "factory_readiness": 8,
+    "demo_impact": 9,
+    "build_risk": 7,
+    "total": 32,
+    "rationale": "Same code-derived geometry, validators, provenance and bounded repair as the others, and its description of the existing scaffold is the only accurate one (single draft stage, critique, repair, applyPackEdit, PDF/XLSX/JSON, SSE all verified present), so the remaining-work list is credible at 7 days. Progressive partial-JSON section reveal, 'What the AI saw' card, pre-rendered exports, live regrade-on-edit and a labelled 'Replay cached run' fallback are exactly what a 3-minute evaluator demo needs. Deductions: the parallel DraftCore/DraftProduction split means two schemas, two prompts and a repair path over both, with cross-reference consistency held only by convention; it lacks Design 1's prose-vs-POM and Arabic validators; and building on an arm64 t4g box (pnpm install + build + Chromium deps on Graviton) is the riskiest infra choice of the three when the dev machine is x86_64 WSL2."
+   },
+   {
+    "design": "Design 3 — Masdr Tech Pack (factory-first edition)",
+    "correctness": 8,
+    "factory_readiness": 10,
+    "demo_impact": 8,
+    "build_risk": 5,
+    "total": 31,
+    "rationale": "The most complete factory artefact: acknowledgement loop, sample-review rounds tied to POM codes with measured-vs-spec deltas, Arabic-first sample-room sheet, immutable versions, glossary check, and a cheap conditional Sonnet detail-zoom on sharp crops (simpler and safer than Design 1's tool loop). But it is 12 stages, three new SQLite tables, share tokens, QR codes, two PDF modes, an 11-sheet workbook and an extra LLM stage on top of the existing scaffold, none of which exists today; for one engineer in one week that is over-scoped and the 3-minute demo cannot show the loop end to end. t3.small (2 GiB) with Node + Chromium is a genuine OOM hazard it admits itself. Lower per-pack differentiation on the progress screen (no section reveal)."
+   }
+  ],
+  "winner": "Design 2 — Masdr Tech Pack (demo-impact-first architecture)",
+  "graft_ideas": [
+   "From Design 1: switch hosting to x86_64 t3.medium and build the standalone bundle on WSL2 (sharp/Chromium parity), instead of pnpm install + build on an arm64 t4g box — removes the single largest infra risk from Design 2.",
+   "From Design 1: add the deterministic prose-vs-POM cross-check validator (numbers quoted in construction prose such as '6 mm' or '10-12 SPI' must equal the G/SA/SPI fields) and the Arabic validators (every _ar twin non-empty, matches \\p{Script=Arabic}, Latin digits only).",
+   "From Design 1: convergence guard on the repair loop — stop when the error count does not strictly decrease, keep the best-scoring build, set needs_human_review with the residual list.",
+   "From Design 1: fixed colour dictionary in code (Khaki 16-0726 TCX #A39264, Jet Black 19-0303 TCX #2D2C2F) so the model can never invent Pantone codes; resolve names to refs in the merge/route stage.",
+   "From Design 1: /api/health renders a one-page PDF at boot and a CI/vitest check calls messages.countTokens with each zodOutputFormat schema to catch grammar-rejecting schema regressions before the demo.",
+   "From Design 1: keep the single TechPackDraft call as the fallback path (env flag) if the parallel DraftCore/DraftProduction split causes cross-reference drift or repair complexity in rehearsal.",
+   "From Design 3: conditional detail-zoom stage — Sonnet 5 at low effort over up to 3 sharp crops of the full-resolution original at bboxes reported by the vision stage, run only when confidence is not high or topstitch_rows is null; no tool-use loop needed.",
+   "From Design 3: a lightweight factory acknowledgement block — a static acknowledgement page in the PDF/XLSX (sample size, units, tolerances, lot shrinkage, thread availability, lead time, name/role/date with Arabic gloss) without the token-share/DB loop; it costs one React component and sells the factory story.",
+   "From Design 3: reuse the print route with ?mode=sample_room to emit an Arabic-primary cutter/sewer sheet (flats + POM chart + cut sheet + op sheet only) — nearly free once print CSS exists, and a strong bilingual differentiator.",
+   "From Design 3: immutable pack_versions table (JSON per version) plus a per-job cost cap (~$1.50) and a code glossary check for the canonical Egyptian terms (حياكة زخرفية, بدل الخياطة, محيط الرأس) in the validator.",
+   "From Design 3: DTM needle/bobbin thread rule per face for the reversible brim topstitch stated explicitly in construction standards and the colorway matrix.",
+   "From Design 3: 'Questions for the factory' receives the unresolved repair issues when the loop exits at 2 iterations, so nothing is hidden."
+  ]
+ }
+]

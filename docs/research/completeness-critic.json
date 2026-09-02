@@ -1,0 +1,64 @@
+{
+ "gaps": [
+  {
+   "gap": "No research on the AI generation layer itself: which LLM/provider, structured-output (JSON schema) mode, multimodal input handling, prompt/temperature strategy, token cost per pack, and hallucination guardrails for factory numbers.",
+   "priority": "P0",
+   "resolution": "Load the claude-api skill, pick one model and a strict JSON-schema/tool-use output path, and write a one-page generation spec (prompt template + schema + 'TBC by factory' rules) before the build plan."
+  },
+  {
+   "gap": "Technical flats are a MUST per the standards research (front/back/side/top/inside-out/brim cross-section with lettered callouts) but no dimension covers HOW they are produced: image-gen model, parametric SVG templates, or user upload.",
+   "priority": "P0",
+   "resolution": "Decide on hand-authored parametric SVG templates for the bucket hat with fixed callout anchor IDs that map to POM codes; defer image generation to v2."
+  },
+  {
+   "gap": "AWS hosting architecture is entirely unresearched: compute (Amplify/Lambda/ECS), storage for uploads and rendered packs (S3), API auth, region choice for Egypt latency, Bedrock vs direct Anthropic API, and rough monthly cost.",
+   "priority": "P0",
+   "resolution": "Choose a minimal stack (CloudFront+S3 static Next.js or Amplify, API Gateway+Lambda, S3, Secrets Manager) with one region, and document deploy steps and cost ceiling."
+  },
+  {
+   "gap": "The two product dimensions contradict each other on seed defaults: inside circumference 56/58/60 vs 57/59/61 cm, tip diameter 17.2 vs 18.0 cm, brim 6.0/6.0/6.5 vs 6.5 all sizes, topstitch offset 5 vs 6 mm, topstitch SPI 8 vs 10-12, brim tolerance +/-0.5 vs +/-0.3, and consumption 0.28 vs 0.20 m per shell.",
+   "priority": "P0",
+   "resolution": "Adopt the bucket_hat dimension (more source-verified) as the single reconciled defaults table and encode it as the headwear template fixture; note techpack_standards values only as ranges."
+  },
+  {
+   "gap": "Colorway logic is unresolved: research notes CW1 Khaki/Black and CW2 Black/Khaki are physically the same reversible hat unless a label side or detail differentiates them, and the label-placement finding was truncated before a recommendation.",
+   "priority": "P1",
+   "resolution": "Make a product decision now: either one colorway with a 'reversible' flag and a designated label-side shell, or CW differentiation by label side; have the generator detect and flag this case."
+  },
+  {
+   "gap": "Output format and rendering pipeline are undefined: JSON only vs HTML vs PDF, and if PDF, how Arabic RTL text and fonts are shaped in a serverless renderer (Puppeteer on Lambda, font embedding, page breaks for spec tables).",
+   "priority": "P1",
+   "resolution": "Ship HTML-first with print CSS for v1; if PDF is required, spike Arabic shaping in the chosen renderer on Lambda before committing."
+  },
+  {
+   "gap": "User intake modality is unspecified: freeform text, guided form, sketch/photo upload, or reference product URL; and whether uploaded images are parsed by the model or only stored.",
+   "priority": "P1",
+   "resolution": "Define an intake schema (product type, fabric, size run, colorways, features, reference images) as a guided form with optional freeform notes; treat images as context only in v1."
+  },
+  {
+   "gap": "Bilingual scope is ambiguous: brand research pushes full EN/AR RTL UI and Arabic factory notes, techpack research only mandates an Arabic label block; no garment-terminology AR-EN glossary or Arabic output quality check exists.",
+   "priority": "P1",
+   "resolution": "Scope v1 to English tech pack + mandatory bilingual label block + AR UI chrome; build a small AR-EN headwear glossary and defer full Arabic pack generation."
+  },
+  {
+   "gap": "No evaluation strategy or ground truth: 'factory-ready' is not measurable, and the recommended programmatic POM validation has no golden fixture to test against.",
+   "priority": "P1",
+   "resolution": "Author a golden bucket-hat tech pack fixture from the reconciled defaults and a rule-based validator (monotonic grades, tolerances present, tip-diameter/circumference consistency, callout coverage) as the acceptance test."
+  },
+  {
+   "gap": "Product scope is unbounded: the generator is described generically but only the bucket hat is researched; other categories (bags, footwear, garments) need distinct POM libraries and construction templates.",
+   "priority": "P1",
+   "resolution": "Declare v1 headwear-only with a template-registry architecture (product type -> POM library + construction ops + sketch set) so new types are additive."
+  },
+  {
+   "gap": "Costing contradiction: brand recommendations call for EGP cost estimates, techpack research marks costing as NICE, and no Egyptian fabric/CMT/trim pricing was researched, so any EGP numbers would be fabricated.",
+   "priority": "P2",
+   "resolution": "Mark costing out of scope for v1 with an explicit 'TBC by factory' placeholder section rather than generating EGP figures."
+  },
+  {
+   "gap": "Legal and asset risks unaddressed: use of the real MASDR logo without permission, commercial fonts (Adrianna, Satoshi), paywalled ES 7266 standard text, and privacy handling of user-uploaded designs on AWS.",
+   "priority": "P2",
+   "resolution": "Use Masdr-style tokens with substitute open fonts and a generic wordmark unless permission is obtained, cite standards by number only, and add S3 lifecycle plus no-training/no-sharing notes for uploads."
+  }
+ ]
+}

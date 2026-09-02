@@ -1,0 +1,991 @@
+{
+ "v2:8b75ad1458fd1984d8cc2bfdf25e61f86b05992a662f066b923c72e509773ad5": {
+  "summary": "Verified against live docs on 2026-09-02: all four Anthropic models (Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5), OpenAI GPT-5.6 Sol/Terra/Luna, and Gemini 3.7 Flash / 3.1 Pro Preview accept image input and support strict JSON-schema structured outputs, so the choice is driven by vision quality, reliability, latency, cost and API ergonomics rather than capability gaps. Recommendation: primary `claude-opus-5` (Anthropic's own \"start here\" model, explicitly positioned for vision-heavy workflows, high-res 2576px vision tier, GA structured outputs via `output_config.format` + `messages.parse`, $5/$25 per MTok, 1000 RPM / 2M ITPM even at Start tier) with `claude-sonnet-5` ($2/$10, \"Fast\", same API surface, no safety-classifier refusals) as the drop-in fallback and as the model for the cheap vision-observation and critic stages. Do not use Fable 5.1 for this: 2x price, \"Slower\", forced `tool_choice` returns 400, 30-day data retention required, smaller rate-limit bucket (500K ITPM / 100K OTPM at Start), and its vision uplift comes mostly from a crop/zoom tool that also lifts Opus/Sonnet. GPT-5.6 Sol (`gpt-5.6-sol`, $4/$20) is a close second and Gemini 3.7 Flash (`gemini-3.7-flash`, $0.75/$3.75 promo, ~340 tok/s) is the cheapest/fastest option, but Google's Pro flagship is still `-preview` and the Flash promo price ends 2026-12-31. Pipeline: pre-resize image in code -> vision observation (structured, with a `zoom` crop tool) -> deterministic template routing -> rulebook-grounded generation of a base size only (cached system prompt) -> compute grading/derived measurements/colorway matrix in code -> schema + code validators -> LLM critic -> bounded (max 2) repair loop. SO-Bench shows frontier models hit ~97% schema validity but <12% exact-value match on image->JSON, which is the empirical case for computing every number you can in code. SDK: TypeScript `@anthropic-ai/sdk` (0.123.0) with Zod `zodOutputFormat` if the demo is a Node/Next.js web app; Python `anthropic` 1.x with Pydantic `messages.parse` otherwise. Env var: `ANTHROPIC_API_KEY`.",
+  "findings": [
+   {
+    "topic": "Anthropic current lineup, IDs, limits, pricing (live docs)",
+    "detail": "Claude Fable 5.1 `claude-fable-5-1` (released 2026-09-01): 1M ctx, 128K out, $10/$50, latency 'Slower', thinking always-on, cache read $0.25. Claude Opus 5 `claude-opus-5`: 1M ctx, 128K out, $5/$25, 'Moderate', adaptive thinking on by default, cache read $0.50, 5m cache write $6.25. Claude Sonnet 5 `claude-sonnet-5` (released 2026-06-30): 1M ctx, 128K out, $2/$10 (introductory price made permanent; the planned Sept 1 increase to $3/$15 was cancelled), 'Fast', cache read $0.20. Claude Haiku 4.5 `claude-haiku-4-5` (alias of `claude-haiku-4-5-20251001`): 200K ctx, 64K out, $1/$5, 'Fastest', old extended-thinking API (budget_tokens), no effort param, knowledge cutoff Feb 2025. All four: text+image in, text out. Batch API = 50% off. Docs say 'start with Claude Opus 5 for most workloads'. Model IDs are dateless pinned snapshots; never append date suffixes.",
+    "source": "https://platform.claude.com/docs/en/about-claude/models/overview and https://platform.claude.com/docs/en/about-claude/pricing",
+    "confidence": "high"
+   },
+   {
+    "topic": "Anthropic structured outputs (GA) - exactly what this pipeline needs",
+    "detail": "`output_config: {format: {type: 'json_schema', schema}}` on messages.create (old `output_format` param and beta header `structured-outputs-2025-11-13` are gone). Supported on Fable 5.1/5, Opus 5/4.8/4.7/4.6/4.5, Sonnet 5/4.6/4.5, Haiku 4.5, on Claude API + Bedrock + Vertex + Foundry. SDK helpers: Python `client.messages.parse(..., output_format=PydanticModel)` -> `.parsed_output`; TS `client.messages.parse` + `zodOutputFormat()` from `@anthropic-ai/sdk/helpers/zod` (or `jsonSchemaOutputFormat`). Strict tool use: `strict: true` on the tool (schema must have `additionalProperties:false` + `required`). Schema limits that matter for a tech pack: NO `minimum`/`maximum`/`multipleOf`, NO `minLength`/`maxLength`, NO recursive schemas, `minItems` only 0 or 1, enums only primitives, `additionalProperties` only false; `$ref`/`$defs` OK. First request per schema pays a grammar-compile latency (cached 24h); changing the format invalidates the prompt cache; format is incompatible with citations.",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs",
+    "confidence": "high"
+   },
+   {
+    "topic": "Anthropic vision limits and image token cost",
+    "detail": "Image sources: base64, URL, or Files API `file_id`. Formats JPEG/PNG/GIF/WebP; 10 MB per image on Claude API (5 MB on Bedrock/Vertex); 32 MB request cap; up to 600 images/request on 1M models. Token cost = ceil(w/28)*ceil(h/28) visual tokens. High-res tier (Claude 4.7 and later = Fable 5.1, Opus 5, Sonnet 5): max long edge 2576 px, max 4784 tokens; Haiku 4.5 is standard tier (1568 px / 1568 tokens). A 1000x1000 product photo = 1296 tokens (~$0.0065 on Opus 5, ~$0.0026 on Sonnet 5); a 3840x2160 photo = 4784 tokens on hi-res models. Put images BEFORE text in the user turn. Claude may mis-count small objects and coordinates are approximate - do not rely on it for measurement extraction from a photo.",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/vision",
+    "confidence": "high"
+   },
+   {
+    "topic": "Crop/zoom tool is the single biggest vision uplift (and works on Opus/Sonnet, not just Fable)",
+    "detail": "Anthropic's cookbook `zoom` tool (inputs x1,y1,x2,y2,image_index; returns a JPEG crop scaled to the 2576px/4784-token budget) raised Chartography accuracy from 29%->73% on claude-fable-5 and 13%->44% on claude-sonnet-5. The Fable 5.1 prompting guide says the same: give vision work a crop tool; a container with PIL/OpenCV is optional. Cost trade-off: ~10x more tokens per question when the tool is used. For a bucket-hat photo, use it to verify brim topstitch rows, eyelets, label placement, and seam type.",
+    "source": "https://platform.claude.com/cookbook/multimodal-crop-tool and https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5-1",
+    "confidence": "high"
+   },
+   {
+    "topic": "Why NOT Fable 5.1 as primary for this prototype",
+    "detail": "(1) 2x Opus price ($10/$50) with 'Slower' latency; single hard requests can run minutes. (2) `tool_choice: any`/`tool` returns 400 on Fable 5.1 - forced tool calls are a common structured-output pattern. (3) Requires 30-day data retention (ZDR orgs get 400). (4) Smaller rate-limit bucket: Start tier 1,000 RPM / 500K ITPM / 100K OTPM (Opus 5 and Sonnet 5 get 2M ITPM / 400K OTPM), and Fable 5 + 5.1 share it. (5) Safety classifiers can return stop_reason 'refusal'. (6) Anthropic's own guidance: use Fable 5.1 only 'when your evals on Claude Opus 5 at higher effort still fall short'. Its raw vision gain is real but the crop tool delivers most of the uplift on cheaper models. Re-evaluate later at `effort: low` where docs claim it is cost-competitive with Opus/Sonnet.",
+    "source": "https://platform.claude.com/docs/en/models/fable-5-1/overview, https://platform.claude.com/docs/en/api/rate-limits, https://platform.claude.com/docs/en/about-claude/models/choosing-a-model",
+    "confidence": "high"
+   },
+   {
+    "topic": "Opus 5 specifics relevant to the build",
+    "detail": "Thinking on by default (adaptive); control cost with `output_config.effort` (low/medium/high/xhigh/max; default high). Disabling thinking is allowed only at effort<=high and causes tool calls to leak into text - keep thinking on and lower effort instead. Sampling params (temperature/top_p/top_k) are rejected on Opus 5 and Sonnet 5 (400) - determinism comes from schema + effort + code, not temperature. Docs list 'Vision: understanding charts, documents, diagrams... strongest when given tools to iteratively analyze, crop, and verify' among Opus 5's largest gains, and the selection matrix names 'vision-heavy workflows' for Opus 5 and 'visual understanding' for Sonnet 5. Minimum cacheable prompt on Opus 5 is 512 tokens. Opus 5 has refusal classifiers: add `fallbacks: 'default'` + beta `server-side-fallback-2026-07-01` (Claude API only; use SDK `BetaRefusalFallbackMiddleware` on Bedrock/Vertex). Sonnet 5 and Haiku 4.5 are not listed as having classifier refusals.",
+    "source": "https://platform.claude.com/docs/en/models/opus-5/whats-new-opus-5 and https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback",
+    "confidence": "high"
+   },
+   {
+    "topic": "Anthropic rate limits and spend caps for a startup demo",
+    "detail": "Start tier: Opus 5 / Sonnet 5 / Haiku 4.5 = 1,000 RPM, 2,000,000 ITPM, 400,000 OTPM each (separate buckets per model); monthly spend cap $500 (Build $1,000; Scale $200,000). Cached input tokens do NOT count toward ITPM. New orgs may begin in an 'Evaluation' tier with lower limits until history builds - buy credits and run traffic a week before demo day. Hitting the spend cap returns 429 with error_code `enforced_spend_limit_reached` and no retry-after.",
+    "source": "https://platform.claude.com/docs/en/api/rate-limits",
+    "confidence": "high"
+   },
+   {
+    "topic": "Anthropic Files API (GA, no beta header)",
+    "detail": "`client.files.upload(...)` -> `file_id`, referenced as `{type:'image', source:{type:'file', file_id}}`. 500 MB/file, 1 TB/org, ~500 file requests/min, optional `expires_in_seconds` (3,600-7,776,000). Files are workspace-scoped (any key in the workspace can read them) - never accept file_ids from end users; keep the user->file mapping in your app DB. Not available on Bedrock/Vertex. Useful here so the photo is uploaded once and referenced by every pipeline stage instead of re-sending base64. Needs Python SDK >=1.2.0 / TS SDK >=0.122.0 for the non-beta namespace.",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/files",
+    "confidence": "high"
+   },
+   {
+    "topic": "OpenAI GPT-5.6 family (current flagship)",
+    "detail": "GPT-5.6 launched 2026-07-09 as Sol/Terra/Luna. Official model page: `gpt-5.6-sol` (alias `gpt-5.6`) $4 in / $0.40 cached / $20 out per 1M (third-party trackers still show $5/$30 pre-Aug-21; OpenAI cut Sol >20% on 2026-08-21 - treat $4/$20 as promotional and re-check), `gpt-5.6-terra` $2/$12, `gpt-5.6-luna` $0.20/$1.20. All: 1,050,000 ctx, 128K out, text+image in, structured outputs + function calling, reasoning.effort none/low/medium(default)/high/xhigh/max, knowledge cutoff 2026-02-16; >272K-token prompts billed 2x input/1.5x output. Tier 1 limits 500 RPM / 500K TPM. Previous: `gpt-5.5` ($5/$30, snapshot gpt-5.5-2026-04-23), `gpt-5.4` ($2.50/$15). Structured outputs via Responses API `text.format: {type:'json_schema', strict:true}`; SDK helpers `client.responses.parse` (Pydantic) and `zodTextFormat` (Zod); refusals come back as a `refusal` content item. Env var `OPENAI_API_KEY`; npm `openai` 7.9.0.",
+    "source": "https://developers.openai.com/api/docs/models/gpt-5.6, https://developers.openai.com/api/docs/models, https://developers.openai.com/api/docs/guides/structured-outputs, https://openai.com/index/gpt-5-6/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Google Gemini 3.x family",
+    "detail": "Current stable: `gemini-3.7-flash` (Aug 2026; 1,048,576 in / 65,536 out; text, image, video, audio, PDF in; thinking low/medium/high; structured output + function calling), `gemini-3.6-flash`, `gemini-3.5-flash` ($1.50/$9), `gemini-3.5-flash-lite` ($0.30/$2.50). Pro flagship is still `gemini-3.1-pro-preview` (Preview status, $2/$12 up to 200K, $4/$18 above); Gemini 3.5 Pro never shipped. 3.7/3.6 Flash pricing: $0.75 in / $3.75 out / $0.075 cached through 2026-12-31, then $1.50/$7.50/$0.15; batch = 50%. Image tokens: 258 per 768x768 tile (258 flat if <=384px), `media_resolution` controls the per-image token cap; up to 3,600 images/request; inline data capped at 20 MB. Structured output supports `minimum`/`maximum`/`minItems`/`maxItems` (which Anthropic rejects). SDKs: Python `google-genai`, JS `@google/genai` 2.20.0; env var `GEMINI_API_KEY`. Artificial Analysis: Gemini 3.7 Flash ~340 tok/s, TTFT 0.77 s.",
+    "source": "https://ai.google.dev/gemini-api/docs/models, https://ai.google.dev/gemini-api/docs/pricing, https://ai.google.dev/gemini-api/docs/models/gemini-3.7-flash, https://ai.google.dev/gemini-api/docs/models/gemini-3.1-pro-preview, https://ai.google.dev/gemini-api/docs/structured-output, https://ai.google.dev/gemini-api/docs/image-understanding",
+    "confidence": "high"
+   },
+   {
+    "topic": "Latency reality check (third-party measurements)",
+    "detail": "Artificial Analysis: Claude Sonnet 5 at max-effort adaptive reasoning streams ~69-79 tok/s with TTFT measured in the tens-to-hundreds of seconds because thinking precedes the first visible token; Gemini 3.7 Flash (low) TTFT 0.77 s at ~340 tok/s; GPT-5.6 Terra non-reasoning TTFT 1.33 s. Implication for the demo: run Claude stages at `effort: medium` (vision observation, critic) and `high` (generation), always stream (`messages.stream().finalMessage()`), show per-stage progress in the UI, and budget 30-90 s end-to-end for the full multi-stage pipeline.",
+    "source": "https://artificialanalysis.ai/models/comparisons/gemini-3-7-flash-low-vs-claude-sonnet-5 and https://artificialanalysis.ai/models/comparisons/claude-sonnet-5-vs-gemini-3-5-flash",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Empirical evidence for image->JSON failure modes (SO-Bench)",
+    "detail": "SO-Bench (~1,800 image samples, 6,500 schemas across UI/natural/document/chart): frontier models reach ~96-98% JSON-schema validity but only 5-11% exact full-structure match (Gemini 2.5 Pro 97.7% valid / 11.4% exact; GPT-5 96.4% / 5.2%). Dominant errors: shallow structures on deep schemas, hallucinated extra fields, misread numbers/units. Schema-guided prompting (spelling out enum values and constraints in the prompt, since the grammar cannot enforce numeric ranges) measurably helps. Conclusion for a tech pack: never let the model produce graded measurements or derived numbers - only base-size observations and qualitative fields; compute the rest.",
+    "source": "https://arxiv.org/html/2511.21750v1",
+    "confidence": "high"
+   },
+   {
+    "topic": "Anthropic's workflow patterns applied to this pipeline",
+    "detail": "'Building effective agents': prefer prompt chaining with programmatic gates between steps when the task decomposes into fixed subtasks (it does here); evaluator-optimizer only 'when we have clear evaluation criteria and iterative refinement provides measurable value' - use it as a bounded critic->repair step, not an open agent loop. Production write-ups (Alan) confirm: Pydantic/Zod validation, structured validation errors fed back to the model, bounded retries (<=2-3), and human review on persistent failure.",
+    "source": "https://www.anthropic.com/research/building-effective-agents and https://medium.com/alan/lessons-from-running-an-llm-document-processing-pipeline-in-production-33d87f99cdb1",
+    "confidence": "high"
+   },
+   {
+    "topic": "Recommended pipeline (7 stages, 3-4 model calls)",
+    "detail": "S0 code: normalize image (long edge <=1568 px to cap at ~1.5K tokens, JPEG q85, strip EXIF), hash, optional Files API upload. S1 Opus 5 (effort medium) 'VisionObservations' via output_config.format: category enum (bucket_hat/cap/...), panel count, brim type, topstitch rows, closures, eyelets, colors as approximate hex + confidence, fabric appearance, reversible {yes/no/unknown}; provide the `zoom` strict tool for detail checks. S2 code: merge user text (authoritative) over observations; select template `bucket_hat_reversible`; unresolved fields -> clarifying-question list. S3 Opus 5 (effort high) 'TechPackDraft' with a cached rulebook system prompt (hat size table, seam/stitch catalogue ASTM D6193 stitch 301/401/504, thread Tex 27-40, SPI 8-10 for 280 gsm twill, seam allowances 1.0 cm, reversible-construction rules: enclosed/bound seams, no exposed allowances, two BOM lines per shell) + one few-shot exemplar; instruct 'base size M only, no grading'. S4 code: grade S/L from M (head circumference S 56 / M 58 / L 60 cm, +/-0.5 cm tol; crown depth ~9.0-9.5 cm; brim 6-7 cm; crown circumference = head + 1.0-1.5 cm ease), colorway matrix (2 colorways x 2 faces), consumption, hex/unit regex checks. S5 code validators (JSON schema, monotonic sizes, unit sanity) then Sonnet 5 (effort low) 'CritiqueReport' {issues[{path,severity,fix}]}. S6 bounded repair (max 2): send JSON + issues, request patched JSON via structured output, re-run S5. Log every stage with usage for evals.",
+    "source": "industry knowledge; size data from https://www.solbari.com/pages/technical-bucket-hat-size-guide and https://www.solbari.com/pages/go-to-bucket-hat-men-size-guide",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Tool-use vs output_config.format for structured output",
+    "detail": "Use `output_config.format` + `messages.parse()` for the single-document outputs (observations, draft, critique) - it is grammar-enforced and returns a parsed object. Use `strict: true` tools only where the model must act (the `zoom` crop tool). Do not rely on `tool_choice: {type:'tool'}` to force JSON - it is removed on Fable 5.1 and unnecessary elsewhere. Keep schemas flat-ish (no recursion, no numeric ranges - encode ranges as enums or validate in code), put the strict enums in the prompt text as well (SO-Bench finding), and keep the schema byte-stable so the compiled grammar (24h cache) and the prompt cache both hit. Parse tool inputs with JSON.parse/json.loads - never string-match.",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs",
+    "confidence": "high"
+   },
+   {
+    "topic": "Prompt caching setup for the rulebook",
+    "detail": "Render order tools -> system -> messages; put the frozen rulebook + exemplar + schema instructions first in `system` with `cache_control: {type:'ephemeral'}` (5-min write 1.25x, read 0.1x; 1-hour write 2x). Opus 5 minimum cacheable prefix 512 tokens. Any byte change (timestamps, per-request IDs, reordered enums, a changed output_config.format) invalidates the cache; verify `usage.cache_read_input_tokens` > 0 on the second call. Cache reads also do not count toward ITPM rate limits.",
+    "source": "https://platform.claude.com/docs/en/about-claude/pricing and https://platform.claude.com/docs/en/api/rate-limits",
+    "confidence": "high"
+   },
+   {
+    "topic": "Per-tech-pack cost estimate",
+    "detail": "Assume 1.3K image tokens + ~3K prompt in / 1.5K out (S1), ~8K in mostly cached / 4K out incl. thinking (S3), ~6K in / 1K out (S5), one repair ~7K in / 3K out. All on Opus 5: ~$0.10-0.15 input + $0.20-0.30 output = roughly $0.30-0.50 per pack (thinking tokens are billed as output). Opus 5 for S1+S3 and Sonnet 5 for S5/S6: ~$0.25-0.40. All Sonnet 5: ~$0.12-0.20. All Fable 5.1: ~$0.60-1.20. GPT-5.6 Sol at $4/$20 lands ~$0.25-0.40; Gemini 3.7 Flash ~$0.03-0.06. Batch API halves Claude cost but is unsuitable for an interactive demo.",
+    "source": "industry knowledge (derived from the official price tables cited above)",
+    "confidence": "medium"
+   },
+   {
+    "topic": "SDK choice and code shape",
+    "detail": "TypeScript: `npm install @anthropic-ai/sdk` (0.123.0 on npm as of today) + `zod`; `const client = new Anthropic()` (reads ANTHROPIC_API_KEY); `client.messages.parse({model:'claude-opus-5', max_tokens:16000, output_config:{format: zodOutputFormat(TechPackSchema), effort:'high'}, messages:[...]})` -> `response.parsed_output`; for long outputs `client.messages.stream(...).finalMessage()`; timeouts are in milliseconds. Python: `pip install anthropic` (1.x, Python >=3.10, httpx2); `client.messages.parse(..., output_format=TechPack)`; timeouts in seconds. Pick TypeScript if the demo is a Next.js/Node web app on the marketplace stack; Python if the team wants Pydantic + Pillow/OpenCV for the crop tool and post-processing (S0/S4) in one process. Both SDKs auto-retry 408/409/429/5xx twice. Use typed errors (RateLimitError etc.) and check `stop_reason` ('refusal', 'max_tokens') before reading content.",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs and npm registry (`npm view @anthropic-ai/sdk version`)",
+    "confidence": "high"
+   },
+   {
+    "topic": "API key / environment setup",
+    "detail": "Anthropic: `ANTHROPIC_API_KEY` (credential resolution order: ANTHROPIC_API_KEY -> ANTHROPIC_AUTH_TOKEN -> `ant auth login` profile -> WIF env vars); optional `ANTHROPIC_BASE_URL`. OpenAI: `OPENAI_API_KEY`. Google: `GEMINI_API_KEY`. Keep them in `.env` (never in the repo), one provider adapter interface so GPT-5.6 / Gemini can be A/B-tested behind the same `TechPackSchema`. Claude on Bedrock/Vertex uses `AnthropicBedrockMantle` / `AnthropicVertex` clients with cloud credentials instead of an Anthropic key (but no Files API, no server-side fallbacks, 5 MB image cap there).",
+    "source": "https://platform.claude.com/docs/en/build-with-claude/vision (curl examples use $ANTHROPIC_API_KEY), https://ai.google.dev/gemini-api/docs/structured-output ($GEMINI_API_KEY), industry knowledge for OPENAI_API_KEY",
+    "confidence": "high"
+   }
+  ],
+  "recommendations": [
+   "Primary model: `claude-opus-5` for the vision-observation (effort `medium`) and generation (effort `high`) stages; fallback and cheap-stage model: `claude-sonnet-5` (critic/repair at effort `low`, and full pipeline fallback on Opus 429/refusal). Reserve `claude-haiku-4-5` only for trivial enum classification if you need it; skip `claude-fable-5-1` for the prototype and re-benchmark it later at `effort: low` once you have an eval set.",
+   "Use the Anthropic SDK directly (TypeScript `@anthropic-ai/sdk` + Zod `zodOutputFormat` for a Node/Next.js demo; Python `anthropic` 1.x + Pydantic if post-processing/crop tooling lives in Python). Use `client.messages.parse` with `output_config.format` for every document-shaped output, `strict: true` only for the `zoom` crop tool, and `messages.stream().finalMessage()` for the generation stage.",
+   "Enable `fallbacks: 'default'` with beta header `server-side-fallback-2026-07-01` on Opus 5 calls so classifier refusals auto-retry on Anthropic's recommended model; always branch on `stop_reason` before reading content.",
+   "Build the pipeline as prompt chaining with code gates: (0) resize/normalize image in code -> (1) structured VisionObservations with zoom tool -> (2) deterministic merge with user text + template routing -> (3) rulebook-grounded TechPackDraft for base size M only, rulebook + exemplar cached with `cache_control` -> (4) compute grading (S 56 / M 58 / L 60 cm head circ, +/-0.5 cm), derived measurements, colorway matrix and BOM consumption in code -> (5) JSON-schema + business-rule validators, then a Sonnet 5 CritiqueReport -> (6) at most 2 repair iterations, then human review flag.",
+   "Design the JSON schemas around Anthropic's grammar limits: no numeric min/max, no minLength/maxLength, no recursion; encode allowed values as enums (size codes, stitch types 301/401/504, SPI 8|9|10, Tex 27|40|60, seam classes) and repeat the enums in prompt text; keep the schema byte-stable across requests so grammar and prompt caches hit.",
+   "Pre-resize photos to <=1568 px long edge (about 1.3-1.5K visual tokens) for the first pass; let the zoom tool pull full-resolution crops only for details (topstitch rows, eyelets, labels). Upload once via the Files API and reference by file_id across stages; keep the user->file_id mapping server-side.",
+   "Before the demo: purchase Anthropic credits so the org leaves the Evaluation tier, confirm Start-tier limits (1,000 RPM / 2M ITPM / 400K OTPM per model, $500/month cap), run 20-30 warm-up generations to prime prompt caches and surface refusals, and log usage per stage to validate the ~$0.30-0.50 per-pack estimate.",
+   "Wrap providers behind one adapter so `gpt-5.6-sol` (Responses API, `text.format` json_schema strict, `OPENAI_API_KEY`) and `gemini-3.7-flash` (`response_json_schema`, `GEMINI_API_KEY`) can be A/B-tested on the same eval set; Gemini 3.7 Flash is the obvious candidate if per-pack cost or sub-second TTFT later matters more than quality.",
+   "Create a 15-30 item eval set now (reversible bucket hat variants, sketches vs photos, Arabic/English descriptions, missing info) with expected observations and measurement tables, and use it to sweep effort levels per stage (Anthropic's guidance: effort is a better lever than switching models)."
+  ],
+  "open_questions": [
+   "Is the prototype a Node/Next.js web app (favors TypeScript SDK + Zod) or a Python service (favors Pydantic + Pillow/OpenCV for the crop tool and post-processing)?",
+   "Does the org already have an Anthropic Console account with purchased credits, and which usage tier is it on? (Evaluation-tier limits could break a live demo.)",
+   "What is the acceptable end-to-end latency for the demo (e.g. under 60 s with streamed progress vs. several minutes offline)? This decides effort levels and whether the critic/repair loop runs synchronously.",
+   "Target cost per generated tech pack and expected demo/beta volume? (Determines whether Opus 5 everywhere, Opus+Sonnet split, or Gemini Flash for some stages.)",
+   "Do you have 1-3 real factory-approved tech packs (ideally from Egyptian suppliers) to use as few-shot exemplars and to define the measurement/POM naming conventions the factory expects (cm vs inches, half-measure vs full circumference)?",
+   "Must outputs be bilingual (Arabic + English) and/or exported to PDF/Excel? (Affects schema design and whether a rendering stage is needed.)",
+   "Is US-only inference / data residency (`inference_geo: 'us'`, 1.1x price) or use of Bedrock/Vertex required for compliance, which would drop Files API and server-side fallbacks?",
+   "Should the pipeline accept multiple images per product (front/back/detail) and hand sketches, and how should conflicts between the photo and the text description be resolved (text wins, ask user, or flag)?"
+  ]
+ },
+ "v2:df2a230d5acc4c208b0e3eda6eb1efd9990275d6a4ab27e106e8205c4549c504": {
+  "summary": "masdrmena.com is \"Masdr\" (logo wordmark \"MASDR\", Arabic \"\u0645\u0635\u062f\u0631\"; LinkedIn/press: \"MASDR MENA\"), a Cairo-based (Sheikh Zayed) bootstrapped B2B marketplace that rebranded from \"Factory MENA\" (announced Mar 2024, relaunched as MASDR in 2026 as \"Egypt's first Alibaba-style marketplace\"). Founders: Farida Bayoumi (CEO), Adham Magdy/Magdi (Co-founder & COO, Adham@masdrmena.com), Peter Magdi. Tagline \"Unlock Egyptian Manufacturing\"; buyers are global/diaspora founders and Egyptian local brands, suppliers are vetted Egyptian factories (claimed top 10%); 9 categories incl. Clothing, Footwear, Bags; features are search/browse, chat + custom quote (RFQ), VERIFIED / READY TO SHIP / LOW MOQ badges (MOQ 5-200 pcs), EGP pricing, built-in Arabic-English translation, full RTL Arabic site. No tech-pack, sampling or AI product-development feature exists today, so the prototype fills a real gap; LinkedIn copy does mention \"streamlined processes from sampling to mass production\". Visual identity is fully recoverable from the live Next.js/Tailwind CSS: deep indigo brand (#251670 logo, #301989 theme-color, #5F50BC primary, #362E83 CTA button), cream/blue-gray neutrals (#F8F6F1, #F1F4F6, #232B32 headings), display font Adrianna, body Satoshi Variable/Onest (Cairo for Arabic), pill buttons (999px radius) with purple glow shadows, 8/12/16px card radii, and a dark glowing-indigo hero.",
+  "findings": [
+   {
+    "topic": "Brand name & spelling",
+    "detail": "Site <title> is \"Masdr\"; footer \"\u00a9 2026 Masdr. All rights reserved.\"; logo wordmark is all-caps \"MASDR\"; Arabic site title/footer \"\u0645\u0635\u062f\u0631\" (\u00a9 2026 \u0645\u0635\u062f\u0631). LinkedIn company page and staff profiles use \"MASDR MENA\". Domain masdrmena.com. Use \"Masdr\" in prose, \"MASDR\" in logo lockups.",
+    "source": "https://masdrmena.com/en ; https://masdrmena.com/ar ; https://www.linkedin.com/company/masdrmena",
+    "confidence": "high"
+   },
+   {
+    "topic": "Tagline / hero copy",
+    "detail": "H1: \"Unlock Egyptian Manufacturing\". Sub: \"Connect with trusted Egyptian factories and source products - all in one place.\" Eyebrow badge: \"Built for 300,000+ Global Founders & Brand Owners\". Arabic H1: \"\u0627\u0643\u062a\u0634\u0641 \u0627\u0644\u062a\u0635\u0646\u064a\u0639 \u0627\u0644\u0645\u0635\u0631\u064a\". Instagram bio: \"Discover verified Egyptian factories. Our Beta is Live\". LinkedIn tagline: \"Find Vetted Factories \ud83c\uddea\ud83c\uddec\" / \"Connecting Visionaries with Vetted Manufacturers\".",
+    "source": "https://masdrmena.com/en ; https://www.instagram.com/masdrmena/ ; https://www.linkedin.com/company/masdrmena",
+    "confidence": "high"
+   },
+   {
+    "topic": "Founders, history, funding",
+    "detail": "Originally \"Factory MENA\" (factorymena.com), announced 9 Mar 2024 by Farida Bayoumi (relocated from Canada to Egypt to build a sunglasses brand, found factories 'invisible'). Rebranded/relaunched as MASDR in 2026, described as \"Egypt's first Alibaba style marketplace\". Founders: Farida Bayoumi (CEO), Adham Magdi/Magdy (Co-Founder & COO), Peter Magdi; plus ~4 part-time staff (tech, photography, listings, logistics). Bootstrapped, no funding found. LinkedIn: founded 2026, Cairo, 2-10 employees, 387 followers; Instagram @masdrmena 26.5K followers. NOTE: /en/about page is unedited template placeholder text (\"since 2010\", \"John Anderson CEO\", \"2,500+ vendors, 85 countries\") and /en/contact shows a San Francisco placeholder address; ignore both.",
+    "source": "https://thestartupscene.me/INVESTMENTS/Factory-MENA-Maps-Egypt-s-Hidden-Manufacturing-Network ; https://www.facebook.com/cairospots/posts/factory-mena-launches-marketplace-to-connect-global-buyers-with-verified-egyptia/1353516536813082/ ; https://www.facebook.com/cairospots/posts/farida-bayoumi-has-launched-masdr-a-platform-connecting-global-buyers-with-egypt/1451266510371417/ ; https://www.linkedin.com/in/amazon-brand-growth/ ; https://masdrmena.com/en/about",
+    "confidence": "high"
+   },
+   {
+    "topic": "Target users & model",
+    "detail": "Buyers: global founders/brand owners, Egyptian diaspora, local Egyptian entrepreneurs/brands (Ahmed Adel's LinkedIn: 'marketplace connecting factories with Egyptian local brands'). Suppliers: Egyptian factories (also claims Morocco & Gulf). CTAs: \"Find a supplier\" / \"Become a supplier\"; supplier onboarding stepper: Business Type -> Account & Verification -> Documents. Free account; product prices listed in EGP with min-max ranges (e.g. EGP 350-1400 puffer vest, MOQ 200 pcs; EGP 28.14-36.8 knife set, MOQ 100). No commission/subscription disclosed. Supplier names are masked (\"WI\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\") until login.",
+    "source": "https://masdrmena.com/en ; https://www.linkedin.com/in/ahmed-adel1288/ ; https://thestartupscene.me/INVESTMENTS/Factory-MENA-Maps-Egypt-s-Hidden-Manufacturing-Network",
+    "confidence": "high"
+   },
+   {
+    "topic": "Categories",
+    "detail": "9 factory categories: Bags, Packaging, Home & Living, Industrial, Jewellery & Accessories, Clothing, Footwear, Furniture, Personal Care & Beauty. Hero quick-search chips: Plastic packaging, Glass bottles, Textile manufacturers, Printing services. Featured apparel listings include a faux-leather puffer vest, crewneck fleece sweatshirt, women's striped trousers; Instagram features an activewear factory (SNBA) and a leather factory. LinkedIn specialties: textiles in Egypt, fashion brands, brand owners.",
+    "source": "https://masdrmena.com/en ; https://www.instagram.com/masdrmena/ ; https://www.linkedin.com/company/masdrmena",
+    "confidence": "high"
+   },
+   {
+    "topic": "Existing features",
+    "detail": "3-step flow: (1) Search or browse categories, (2) Chat & request quotes directly, (3) Confirm production & ship. Badges on product cards: VERIFIED (green #0A9359), READY TO SHIP (teal #0CA3C6), LOW MOQ, FLASH SALE (red #FF3000). Live chat, payment gateway, factory profiles with facility photos. \"Why Source From MENA\": Faster Shipping (routes to Europe), Competitive Pricing Without Compromise, High Quality / Verified Factories, Arabic-English translation built in (\"our smart translation keeps conversations clear, professional, and mistake-free\"). Backend: Rails at api.masdrmena.com / admin.masdrmena.com; frontend Next.js + Tailwind v4, Swiper carousels.",
+    "source": "https://masdrmena.com/en (HTML + CSS chunks)",
+    "confidence": "high"
+   },
+   {
+    "topic": "Tech pack / sampling / AI mentions",
+    "detail": "No tech pack, sampling, product-development, design or AI feature on the site. Only related copy: LinkedIn about text mentions \"streamlined processes from sampling to mass production\" and \"rigorous vetting (top 10% of factories)\"; translation is called 'smart'. The RFQ is a free-text chat/quote request, so an AI tech pack generator is a natural pre-RFQ step (\"Generate tech pack -> Request quotes\").",
+    "source": "https://www.linkedin.com/company/masdrmena ; https://masdrmena.com/en",
+    "confidence": "high"
+   },
+   {
+    "topic": "Languages / RTL",
+    "detail": "<html lang=\"en\" dir=\"ltr\"> at /en and <html lang=\"ar\" dir=\"rtl\"> at /ar; body gets class font-cairo in Arabic. Locale switcher shows \"Egypt (EN/EGP)\" / \"\u0645\u0635\u0631 (\u0639\u0631\u0628\u064a/\u062c\u0646\u064a\u0647)\". Product cards remain English in AR mode. Tailwind logical props (ps-/pe-/border-s-, rtl:-scale-x-100 on arrows) are used throughout.",
+    "source": "https://masdrmena.com/ar",
+    "confidence": "high"
+   },
+   {
+    "topic": "Color tokens (from :root in site CSS)",
+    "detail": "Purple scale: --purple-900 #251670 (logo colour, exact pixel match; also --background-dark), --purple-800 #2A286C, --purple-700 #301989 (--purple-main, meta theme-color, --text-accent), --purple-600 #362E83 (primary CTA fill), --purple-500 #5F50BC (--primary), --purple-400 #6056A5 (--text-secondary), --purple-200 #9E8DFF (--primary-light), --purple-150 #B7A9D2 (--border-light), --purple-100 #BBB9F9 (--primary-soft), --text-accent-light #5B3FAE, --border-default #938BC3. Accents: --cta #FF9369 coral, --cta-hover / --red-500 #FF3000, --link / --teal-400 #0CA3C6, --tag-verified #0A9359, --magenta-500 #C41A73, --pink-300 #FFA4D4, --teal-200 #98E3F4, --text-price #CC2F26. Neutrals: --cream #F8F6F1 (page bg), --blue-gray-50 #F1F4F6, --blue-gray-100 #E3E8ED, --blue-gray-400 #91A5B9, --blue-gray-500 #758EA7, --blue-gray-600 #5E7286, --blue-gray-800 #2F3943 (body text), --blue-gray-850 #232B32 (headings), --gray-900 #1A1A1A, Grayscale-50 #F2F2F2, card bg #F8F9FB, dark section bg #0A0A1E and #1A1130. Most-used hexes in compiled CSS: #E1E8EF, #301989, #1E2B34, #1A1A1A.",
+    "source": "https://masdrmena.com/_next/static/chunks/11uik7vbsfhc3.css and sibling CSS chunks linked from https://masdrmena.com/en",
+    "confidence": "high"
+   },
+   {
+    "topic": "Typography",
+    "detail": "--font-display: \"Adrianna\", sans-serif (self-hosted /fonts/adrianna/adrianna-regular.woff2; used on h1/h2 at 50px desktop / 32px mobile, weight 400, line-height 120%, letter-spacing -0.08vw). --font-subtitle / body default: \"Satoshi Variable\" (/fonts/Satoshi-Variable.woff2). --font-body: area-normal / area-bold-demo; --font-legacy: Onest (used on chips/buttons). Geist + Geist Mono loaded via next/font; Cairo 400/500/600 for Arabic. Type scale (vw desktop / px mobile): display 3.81vw/32px, h1 3.7vw/28px, h2 2.14vw/22px, h3 1.67vw/18px, h4 1.19vw/16px, body-large 1.07vw/16px, body 0.95vw/14px, small 0.83vw/13px, caption 0.71vw/12px. Line-heights 120/130/140/150%. Fallback stack for prototype: Adrianna is commercial (Typodermic) -> substitute 'Satoshi' or Google 'Outfit'/'Manrope'; Satoshi (Fontshare) -> substitute 'Inter'; Cairo is on Google Fonts.",
+    "source": "https://masdrmena.com/en HTML preload links + CSS chunks",
+    "confidence": "high"
+   },
+   {
+    "topic": "Buttons, radii, shadows, spacing",
+    "detail": "Primary CTA (\"Create account\"): pill rounded-full, h-44px, min-w 161px, px-24px, bg var(--purple-600) #362E83, hover #301989, white text 16px font-medium, box-shadow 0 0 29px 0 #362E83 + inset 0 0 20px rgba(255,255,255,0.35) (glow). Secondary (\"Log in\"): pill, bg white/10, hover white/15, white bold text. Tertiary (\"Visit Supplier\"): bg #F3F3F3 hover #E8E8E8, text #5B3FAE, radius 6-8px, py 6-8px px 14-16px. Chips: pill bg white/10 hover white/20, Onest medium. Hero search bar: 600x66px pill (rounded 104px) bg rgba(255,255,255,0.3) backdrop-blur 62.8px, inner white pill with shadow 0 0 18px rgba(0,0,0,.1). Badge pill: border #BAA8D5, bg rgba(186,168,213,.2), inset white glow, text #F8F9FB bold. Tokens: --radius-sm 8px, --radius-md 12px, --radius-lg 16px; cards 20-24px; hero container 1.43vw (~16-20px); spacing scale 4/8/12/16/20/24/32px. Shadows: 0 4px 10px rgba(0,0,0,.15), 0 8px 24px rgba(15,23,42,.06), 0 20px 60px rgba(0,0,0,.3). Category tabs: left 3px accent border #301989 on active, hover bg #E3E8ED.",
+    "source": "https://masdrmena.com/en HTML class attributes + CSS",
+    "confidence": "high"
+   },
+   {
+    "topic": "Logo & imagery style",
+    "detail": "Logo: geometric factory-sawtooth-roof silhouette (three rising diagonal peaks, like a shed roof / upward chart) above thin geometric sans wordmark \"MASDR\"; single colour #251670 (masdr-logo-purple.png, 8000x7388) with white variant (masdr-logo-white.png) on dark nav. Favicon = purple logo. Hero: near-black (#000-#101020) top fading into glowing indigo/violet (#201060 -> #9E8DFF-ish) at bottom, blurred light beams, inside a rounded 1.43vw container with white text and drop-shadow glow; header floats absolutely over hero with white text. Body sections on white/cream with rounded #F8F9FB panels; product photos on #F2F2F2 tiles with mix-blend-multiply; category tiles use muted gradient backgrounds (#F4F4F4->#565656->#BEDAD6, #D4D8D8->#7E8C8A, #252424->#3C3C3C). Final CTA section on #0A0A1E dark rounded panel. Instagram imagery: real factory-floor reels, machinery, product close-ups.",
+    "source": "https://masdrmena.com/masdr-logo-purple.png ; https://masdrmena.com/images/heroNewBg.webp ; https://masdrmena.com/en",
+    "confidence": "high"
+   },
+   {
+    "topic": "Tone of voice",
+    "detail": "Startup-clean, confident, buyer-centric B2B: short imperative headlines (\"Unlock Egyptian Manufacturing\", \"Ready to start sourcing?\"), benefit triads, trust words (trusted, verified, vetted, consistent, mistake-free), plain sentences, no jargon, sentence-case body, TITLE-CASE badges, em-dashes. Arabic copy is formal MSA (\"\u0627\u0637\u0644\u0628 \u0639\u0631\u0636 \u0633\u0639\u0631 \u0645\u062e\u0635\u0635 \u0644\u0639\u0644\u0627\u0645\u062a\u0643 \u0627\u0644\u062a\u062c\u0627\u0631\u064a\u0629\"). Currency always \"EGP\" prefix, MOQ shown as \"MOQ 200 pcs\".",
+    "source": "https://masdrmena.com/en ; https://masdrmena.com/ar",
+    "confidence": "high"
+   },
+   {
+    "topic": "Contact / footer",
+    "detail": "Address: Sheikh Zayed, Cairo, Egypt. Phone +20 120 555 3884. Email Adham@masdrmena.com. Socials: LinkedIn, Instagram @masdrmena. Footer links: Privacy Policy, Terms of Service, Refund Policy, Shipping Policy. Auth routes: /en/auth/login, /en/auth/signup; supplier pages /suppliers/<slug>.",
+    "source": "https://masdrmena.com/en",
+    "confidence": "high"
+   }
+  ],
+  "recommendations": [
+   "Name the prototype as a Masdr feature, e.g. \"Masdr Tech Pack\" / \"AI Tech Pack Generator\", positioned as the step between browsing factories and 'Chat & request quotes' (Step 2). Add a 'Send to factories for quotes' CTA so it slots into the existing 3-step flow.",
+   "CSS variables to copy verbatim: --primary #5F50BC; --primary-dark #2A286C; --primary-darker #251670; --purple-main #301989; --primary-light #9E8DFF; --primary-soft #BBB9F9; --cta #FF9369; --cta-hover #FF3000; --link #0CA3C6; --tag-verified #0A9359; --cream #F8F6F1; --blue-gray-50 #F1F4F6; --blue-gray-100 #E3E8ED; --text-heading #232B32; --text-body-dark #2F3943; --border-light #B7A9D2; --radius-sm/md/lg 8/12/16px. Set meta theme-color #301989.",
+   "Header/hero: dark indigo panel (#0A0A1E -> #251670 radial glow, or a CSS radial-gradient(ellipse at 50% 120%, #9E8DFF 0%, #301989 35%, #000 80%)) inside a 16-20px rounded container with white MASDR wordmark, white 50px display headline with subtle white drop-shadow, and a pill badge (border #BAA8D5, bg rgba(186,168,213,.2)) like \"Built for 300,000+ Global Founders & Brand Owners\".",
+   "Buttons: primary = pill, 44px tall, bg #362E83, hover #301989, white 16px medium, glow shadow 0 0 29px #362E83 + inset 0 0 20px rgba(255,255,255,.35); secondary = pill bg rgba(255,255,255,.1) on dark or #F3F3F3 with #5B3FAE text on light; upload dropzone = white pill/rounded-24px card with 0 0 18px rgba(0,0,0,.1) shadow and backdrop-blur.",
+   "Fonts: use Satoshi (Fontshare) or Inter for UI/body at 14-16px, a geometric display face (Outfit/Manrope 400) for section titles at 24-50px with -1% tracking, Cairo for Arabic, and Geist Mono for spec-table numbers (Geist Mono is already loaded on the site). Do not fake Adrianna.",
+   "Tech pack pages: white/cream (#F8F6F1) page, sections as #F8F9FB rounded-24px panels, spec tables with #E3E8ED borders, #232B32 header row text, alternating #F1F4F6 rows; colorways shown as swatch tiles on #F2F2F2 with Pantone/hex labels; status chips reuse Masdr badge colours (VERIFIED green #0A9359, READY TO SHIP teal #0CA3C6, LOW MOQ purple #5F50BC, FLASH SALE red #FF3000).",
+   "Ship EN + AR toggle with dir=rtl, logical CSS properties (padding-inline, border-inline-start) and Cairo font in AR mode, mirroring the real site's locale pill \"Egypt (EN/EGP)\" / \"\u0645\u0635\u0631 (\u0639\u0631\u0628\u064a/\u062c\u0646\u064a\u0647)\"; show MOQ as \"MOQ 200 pcs\" and cost estimates in EGP.",
+   "Copy tone: imperative sentence-case headlines, trust vocabulary (verified, factory-ready, mistake-free), no exclamation marks; e.g. 'Turn a sketch into a factory-ready tech pack' / 'Send to verified factories for quotes'.",
+   "Do not reuse the /en/about placeholder facts (2010, John Anderson, 85 countries) or the /en/contact San Francisco address anywhere in the prototype; use Sheikh Zayed, Cairo and the real founders if attribution is needed."
+  ],
+  "open_questions": [
+   "Should the prototype be branded as a native Masdr feature (use their logo/wordmark) or as a white-label pitch with Masdr-like styling only? Using the real logo may need their permission for anything shared publicly.",
+   "Is the primary user the buyer (brand owner generating a pack before RFQ) or the factory/supplier side (reviewing incoming packs)? The site is buyer-first, but supplier onboarding exists.",
+   "Should the output default to EGP costing and Egyptian sizing/units (cm) with Arabic construction notes for factories, or English-only for the first pass?",
+   "Do you want the tech pack to end with a 'Request quotes from N matching Clothing factories' handoff into Masdr's chat/RFQ flow (mocked), which is the strongest product-fit story?",
+   "Licensing: are you fine substituting Adrianna/Satoshi with open fonts, or do you have access to the licensed files?"
+  ]
+ },
+ "v2:8c8d808d1fc448c5a8d0bc72186c46110cb3dee5a7be2995d1eaa710d438c029": {
+  "summary": "A factory-ready apparel/accessory tech pack is a versioned document whose canonical order is: cover/header -> technical flats with callouts -> BOM -> measurement (POM) chart with base size, grade rules and tolerances -> construction/workmanship (ISO 4915 stitch, ISO 4916 seam, SPI, seam allowance, topstitch, pressing) -> colorways / BOM-by-color -> labels, packing and QC/AQL -> fit comments and revision log (sources: Techpacker, Apparel Entrepreneurship, Sewport, Fashion Index, Specter OS headwear guide). For the canonical bucket-hat case the industry numbers are concrete: EN 13402-style head girth S 55-56 / M 57-58 / L 59-60 cm with 1 cm ease and 1-2 cm grade, crown depth 8-10 cm, brim 5-7 cm, 1 cm seam allowance, 301 lockstitch at 10-12 SPI seaming and 7-8 SPI topstitch, Tex 40 poly-core topstitch / Tex 27-30 seaming, tolerances +/-0.5 cm on crown/brim and +/-1.0 cm on circumference, AQL 2.5 major / 4.0 minor at ISO 2859-1 GII. Egypt's domestic market requires Arabic labels (country of origin, manufacturer name, product description) and the mandatory ES 7266 series (7266-3/2023 apparel & home textiles, 7266-4 garments) covering fiber content %, care (ES 1405/2014 = ISO 3758 symbols), origin, manufacturer/importer and restricted chemicals; export markets add EU 1007/2011 fiber naming, US FTC fiber/origin/RN + 16 CFR 423 care, and GSO/SASO Arabic fiber+care+origin. For a prototype, the MUST set is header, front/back/side flat with callouts, BOM with composition/gsm/width/consumption/color ref, POM chart across 3 sizes with cm tolerances, construction notes with stitch/SPI/SA/thread, colorway table with Pantone TCX, label list and packing basics; costing, grading formulas, detailed carton specs and sample-stage sign-off can be NICE placeholders.",
+  "findings": [
+   {
+    "topic": "Canonical section order (industry consensus)",
+    "detail": "Techpacker's 2026 guide: (1) cover/style info, (2) technical flat sketches front/back/side with callouts to every seam, stitch detail and hardware, (3) BOM with Pantone color ref, supplier ref, unit of measure, (4) POM chart at base size with tolerance per POM + grading rules, (5) construction notes (seam types, SPI, thread color, finishing), (6) cost sheet, (7) revision history. Apparel Entrepreneurship's 10-page order: cover, front/back flats, detail flats, measurement spec, BOM, construction & workmanship, colorways, graphics/embroidery, labels & packaging, fit comments & revision log. Specter OS headwear-specific order: cover (style, season, colourway, revision history), flats (front/back/side/detail), BOM, POM, construction (stitch types, seam allowances), decoration specs, colourways, labelling & packaging. Sewport's five measurement columns: POM, Description (how to measure), Requested, Tolerance +/-, Fit comments.",
+    "source": "https://techpacker.com/blog/design/what-is-a-tech-pack/ ; https://www.apparelentrepreneurship.com/what-is-a-tech-pack-why-do-you-need-it-and-why-is-it-important/ ; https://www.specter-os.com/blog/cap-tech-pack ; https://sewport.com/tech-pack",
+    "confidence": "high"
+   },
+   {
+    "topic": "Cover / header fields",
+    "detail": "Union of sources: brand, style name, style number, season/drop, product category, gender, fit type, sample (base) size and size range, colorway list, date created, last modified, version number, designer/technical designer, fit approver / approval sign-off, factory name, country of origin, target retail/FOB price, thumbnail flat. Techpacker: style name, style number, season, colorways, brand, date, version. Fashinza/WFX product summary adds product code, product type, gender, creation date, last modified, country of origin, retail price. Revision log must record what changed, when, who approved.",
+    "source": "https://techpacker.com/blog/design/what-is-a-tech-pack/ ; https://www.apparelentrepreneurship.com/what-is-a-tech-pack-why-do-you-need-it-and-why-is-it-important/ ; https://www.worldfashionexchange.com/blog/tech-pack-101-everything-you-need-to-know-about-fashion-tech-packs/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Technical flat sketch requirements",
+    "detail": "Black-and-white vector flats, no color/shading, front and back minimum; side and interior/inside-out views for accessories and reversibles; separate detail/zoom flats with cross-sections for construction layers; callout lines to every seam, topstitch row, label placement, hardware; POM letters drawn on a dedicated POM sketch so each measurement code maps to a line on the drawing. For the reversible bucket hat: front, side, top (crown tip), inside-out view of reverse colorway, brim cross-section showing the 2-layer sandwich and topstitch position.",
+    "source": "https://sewport.com/tech-pack ; https://techpacker.com/blog/design/what-is-a-tech-pack/ ; https://www.techpackwizard.com/post/a-must-have-sketch-for-fashion-tech-packs",
+    "confidence": "high"
+   },
+   {
+    "topic": "BOM columns",
+    "detail": "Recommended columns: item no.; component/placement (e.g. outer shell, reverse shell, brim, thread, main label); description; material type; fiber composition; construction (3/1 twill); weight gsm (with +/-5% tolerance); width cm (usable); finish (pre-shrunk, peached, enzyme); supplier + article/reference no.; color name + Pantone TCX + lab-dip ref; consumption per unit (m, pcs) and wastage %; unit of measure; size dependency (Y/N, per-size values); comments/test requirements (shrinkage <=3%, colorfastness ISO 105-C06 grade 4). Sewport lists: Placement, Comments, Material (fiber content, ID numbers), Supplier, Colour Number. Techpacker: color ref (Pantone), supplier ref, UoM. AE: main fabric content, weight, width, finish; lining/interlining; trims with codes; labels; thread; packaging.",
+    "source": "https://sewport.com/tech-pack ; https://techpacker.com/blog/design/what-is-a-tech-pack/ ; https://www.apparelentrepreneurship.com/what-is-a-tech-pack-why-do-you-need-it-and-why-is-it-important/ ; https://sphere-sports.com/product/sp-025-280gsm-cotton-twill-fabric/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Main fabric spec for the canonical case",
+    "detail": "100% cotton 3/1 twill, 280 gsm +/-5%, 145-150 cm cuttable width, pre-shrunk (residual shrinkage <=3% at 60 C wash), yarn-dyed or piece-dyed; two shells required (khaki + black) since the hat is reversible. Consumption: DIY patterns quote ~0.5 m of 112 cm fabric per shell; on a 150 cm marker an adult bucket hat (crown tip, 2 side-band pieces, 2 brim pieces) typically nests at ~0.25-0.30 m per shell, so plan ~0.28 m khaki + ~0.28 m black per hat plus 8-10% wastage for a first run (marker-yield number is an estimate, confirm with factory).",
+    "source": "https://sphere-sports.com/product/sp-025-280gsm-cotton-twill-fabric/ ; https://m.globaltextiles.com/product/250GSM-Cotton-Twill-Fabric-101884.html ; https://www.clothhouse.com/blogs/news/free-pattern-the-bucket-hat ; https://www.applegreencottage.com/tutorial-cute-bucket-hat/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Trims: thread, labels, hangtags, polybags, cartons",
+    "detail": "Thread: headwear standard is Tex 40 polyester (poly-core or spun) tonal for seams and topstitch (Specter OS); A&E woven guide uses T-24/T-27 for seaming/loopers and T-40 core for topstitch on casual pants; needle Nm 80-90 (80/12-90/14) for Tex 27-40. For 280 gsm twill: seaming Tex 27-30 with Nm 80-90 needle; brim topstitch Tex 40 (Tex 60 if a heavier decorative look) with Nm 90-100. Labels: main/brand woven label (~30x40 mm) at centre back inside crown; size label below main label; care+content label (fiber %, care symbols, origin, manufacturer); country-of-origin. For a reversible hat the label goes into the side-band/brim seam so it reads from either side, or use printed/heat-transfer labels on the inner reverse. Hangtag: card weight, string/plastic tag-pin, attachment point (brim edge or label). Polybag: clear PE with suffocation warning, size and thickness (typ. 0.03-0.04 mm), one hat per bag flat or nested. Carton: 5-ply corrugated, inner/master ratio, size assortment, gross weight max (<=15-18 kg typical buyer rule), carton marks: style, PO, colour, size, qty, carton no./total, origin, gross/net weight, dimensions.",
+    "source": "https://www.specter-os.com/blog/cap-tech-pack ; https://www.amefird.com/wp-content/uploads/2010/01/threadrecommendwoven2.pdf ; https://www.thethreadexchange.com/miva/merchant.mvc?Screen=CTGY&Category_Code=needle-size-chart ; https://superlabelstore.com/pages/hat-labels ; https://www.fashionindex.com/blog/apparel-tech-pack-labeling-folding-packaging ; https://www.footlocker-inc.com/content/dam/flincfoundation/footlockerinc_documents/vms/pdfs/2021%20VSM%20Section%2006%20-%20Carton%20Packing,%20Packaging,%20Labeling,%20Shipping%20and%20Loading%20Requirements.pdf",
+    "confidence": "medium"
+   },
+   {
+    "topic": "POM conventions, codes, base size, grade rules, tolerances",
+    "detail": "POMs get a code (A, B, C... or numeric 001, 002) in a logical measuring order; each has a how-to-measure description with method type: straight, curve, half circumference, full circumference, flat vs extended; standard abbreviations HPS, CB, CF, AH, SS. Chart columns: code, POM name, how-to-measure, tolerance (+/-), base size value, then each graded size, grade increment. Base size is the sample size (M for S/M/L). Measure in cm to 0.1 cm (or 0.5 cm steps for factory charts). Generic apparel tolerances: +/-1.0 cm most points, +/-0.5 cm collar/cuff/small trims, +/-1.5 cm body length. Headwear: +/-0.5 cm crown height, brim width/length, sweatband depth; +/-1.0 cm head circumference (adjustable), +/-0.5 cm finished circumference for fitted; check finished internal circumference after pressing because steaming can shift the opening 2-4 mm. Lot rejected if >20% of sampled pieces are out of tolerance.",
+    "source": "https://www.fashionindex.com/blog/apparel-tech-pack-pom ; https://helpcenter.techpacker.com/hc/en-us/articles/360035467954-How-to-create-measurements-table ; https://sewport.com/tech-pack ; https://www.specter-os.com/blog/cap-tech-pack ; https://crownsforge.com/blog/hat-sizing-fit-international-markets-2026-update.html ; https://www.onesilq.com/blog/apparel-aql-inspection",
+    "confidence": "high"
+   },
+   {
+    "topic": "Bucket hat size set and POM values (S/M/L)",
+    "detail": "EN 13402 head-girth bands: S 54-56, M 56-58, L 58-60 cm; OEM cap makers use S 55-56, M 57-58, L 59-60 cm. Recommended for prototype (finished inside circumference, measured at sweat line, full circumference): S 56.0, M 58.0, L 60.0 cm (+/-1.0) i.e. 2 cm grade; pattern adds 1-1.5 cm wearing ease. Crown/side-band height (side seam, tip seam to brim seam): 8.5-9.5 cm (+/-0.5), e.g. S 8.5 / M 9.0 / L 9.5 or hold 9.0-9.5 constant (Solbari holds 9.5 cm across sizes). Crown tip: diameter ~ (circ-4)/pi -> S 16.5 / M 17.2 / L 17.8 cm (+/-0.5). Brim width (band seam to edge, straight): 6.0 cm S/M, 6.5-7.0 cm L (+/-0.5); Solbari uses 6 cm S/M, 7 cm L/XL. Brim edge circumference derived. Total hat height (tip to brim edge) ~15-16 cm. Optional POMs: topstitch distance from seam 2-3 mm, eyelet dia (none here), label position from CB seam.",
+    "source": "https://www.onlineconversion.com/clothing_en13402_standard.htm ; https://www.yukaihe.com/bucket-hat-sizing-fit-guide ; https://www.solbari.com/pages/technical-bucket-hat-size-guide ; https://happyoff.com/blogs/news/bucket-hat-sizing-technical-guide ; https://sewingtrip.com/how-to-sew-a-bucket-hat/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Construction section conventions (ISO 4915 / ISO 4916 / SPI / SA / topstitch / pressing)",
+    "detail": "Write each operation as: op no., operation name, seam class ISO 4916 (e.g. 1.01.01 superimposed plain seam; 2.02 lapped; 6.02 edge-neatening; 8.x for bindings), stitch type ISO 4915 (301 lockstitch, 401 two-thread chain, 504 three-thread overedge, 516 safety), SPI, seam allowance mm, thread Tex + needle Nm, machine type, pressing. Woven twill guidance: seaming 10-12 SPI (chino/dress pants), 8-10 SPI for heavier twill bottoms, topstitching 7-8 SPI; cap crown topstitch single needle 7-8 SPI 2 mm off seam; cap SA 6 mm, bucket hat SA 10 mm (DIY/industry patterns). Recommended bucket hat op list: (1) join 2 side-band pieces CB/CF, 301, 10-12 SPI, SA 10 mm, press open, topstitch each side 2 mm optional; (2) set crown tip to band, 301, SA 10 mm, notch, press SA down, topstitch band 3 mm below seam; (3) join brim halves, press open; (4) repeat 1-3 for reverse shell; (5) attach brim to each shell; (6) place shells right-sides-together at brim edge, 301 SA 10 mm, leave 6-8 cm gap, turn, press edge, close gap inside edge topstitch; (7) single-row brim edge topstitch 301, 8 SPI, 5 mm from edge, Tex 40; (8) tack shells together at band/brim seam (stitch-in-ditch) so hat reverses cleanly; (9) final press/steam, thread trim, inspection.",
+    "source": "https://www.iso.org/standard/10934.html ; https://abcseams.com/stitch-classification-iso-4915-ascs/ ; https://www.amefird.com/wp-content/uploads/2010/01/Selecting-the-right-SPI-2-5-10.pdf ; https://www.specter-os.com/blog/cap-tech-pack ; https://hellosewing.com/diy-bucket-hat-pattern/ ; https://sweetredpoppy.com/free-reversible-bucket-hat-sewing-pattern/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Colorway / BOM-by-color tables",
+    "detail": "Colorway page lists each colorway with a code (CW1, CW2), name, a flat tinted per colorway, and a matrix of BOM components x colorway giving color name + Pantone TCX + hex + lab-dip status for each; start matching from the hardest-to-match item; reference systems: Pantone TCX (cotton), TPG, RGB/CMYK for artwork. Canonical case: CW1 'Khaki/Black' outer Khaki PANTONE 16-0726 TCX (#A39264), reverse Jet Black PANTONE 19-0303 TCX (#2D2C2F); CW2 'Black/Khaki' the inverse. Thread tonal to each shell: khaki side thread matched to 16-0726, black side to 19-0303 (for a single-row brim topstitch specify which side the needle thread faces and that bobbin is matched to the opposite shell). Labels: black ground/khaki text on both.",
+    "source": "https://www.fashionindex.com/blog/apparel-tech-pack-colorways ; https://www.colorxs.com/color/pantone-16-0726-tcx-khaki ; https://www.colorxs.com/color/pantone-19-0303-tcx-jet-black",
+    "confidence": "high"
+   },
+   {
+    "topic": "Label / packing / QC / AQL section",
+    "detail": "Label page: each label type with artwork ref, size mm, material (woven damask, printed satin, heat transfer), fold type (end-fold, centre-fold, loop), placement measured from a reference seam, sew method (301 4-side or 2-side). Care text/symbols per ISO 3758 (GINETEX symbols): 100% cotton twill hat = wash 30 C, no bleach, do not tumble dry, iron low, do not dry clean (or as tested). Packing: fold/flat method, polybag size/thickness, warning text, sticker with style/colour/size/barcode, hangtag placement, inner pack qty, assortment ratio (e.g. S:M:L = 1:2:1 or solid size cartons), master carton dims and gross weight cap, shipping marks. QC: ISO 2859-1 single sampling, General Inspection Level II, AQL 2.5 major / 4.0 minor (0 critical); for 1,201-3,200 pcs sample 125, for 3,201-10,000 sample 200; the widely quoted example is sample 315 accept 14 / reject 15 at AQL 2.5. Include measurement audit (min 10 pcs/size), defect classification list, and tests: fabric gsm, shrinkage (ISO 6330), colorfastness to washing (ISO 105-C06) and rubbing (ISO 105-X12), seam strength.",
+    "source": "https://www.fashionindex.com/blog/apparel-tech-pack-labeling-folding-packaging ; https://www.ginetex.net/thematique/GB/care/iso-37582023-standard-has-been-published ; https://www.qima.com/aql-acceptable-quality-limit ; https://www.apparelsearch.com/quality/aql/aql_inspection_clothing_acceptable_quality_levels_apparel.htm ; https://www.hqts.com/2-5-aql/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Sample stages",
+    "detail": "Proto (first sample, one size, checks design/feasibility) -> Fit sample (against spec, on form/model; often 2-3 rounds) -> Size set (graded run to verify grade rules) -> Salesman/photo samples (optional) -> PP / pre-production sample (bulk fabric & trims, on production line; buyer 'seals' it = gold seal / red tag) -> TOP (top of production, pulled from first bulk output and compared to PP) -> shipment sample. Tech pack should carry a sample log: stage, date sent/received, size, measured vs spec deviations, comments, approval status, approver. For a first-run small brand: proto + 1 fit + PP is a realistic minimum.",
+    "source": "https://www.onlineclothingstudy.com/2018/08/14-different-types-of-garment-samples.html ; https://techpacker.com/blog/manufacturing/12-types-of-garment-samples-you-should-know-about-for-apparel-production/ ; https://www.uphance.com/blog/the-types-of-garment-samples-in-apparel-production/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Egypt domestic-market textile labelling (EOS)",
+    "detail": "Goods sold in Egypt must carry non-erasable Arabic labels with country of origin, manufacturer's name and product description; labels may not be affixed after import (labels must be sewn in at the factory). Mandatory Egyptian Standard ES 7266 series 'Safety and health criteria and labelling for textile products' (EOS): Part 3 apparel and home textile (ES 7266-3/2023, obligatory, 37 pp, references EU 1007/2011 fibre names, REACH Annex XVII, EU 2014/350 Ecolabel), Part 4 garments (ES 7266-4:2011). Label elements per ES 7266-3: name/trademark, full fibre composition with percentages, care instructions (wash/bleach/iron), country of origin, manufacturer/importer name and address, net weight where applicable, warnings; restricted-chemical limits (banned azo dyes, formaldehyde per ISO 14184-1, nickel/cadmium, TRIS flame retardants). Care symbols per ES 1405/2014 which adopts ISO 3758:2012. Export goods entering Egypt from foreign factories additionally need GOEIC factory registration (Decree 43/2016, 44/2019) and Decree 477/2018 (ES 7322) for some textile/leather items. Practical rule for the tech pack: main label may be brand-only; care/content label must be bilingual Arabic/English with fibre % (e.g. 100% \u0642\u0637\u0646 / 100% cotton), care symbols + Arabic text, '\u0635\u0646\u0639 \u0641\u064a \u0645\u0635\u0631 / Made in Egypt', manufacturer name; put a size label with cm (e.g. M 58 \u0633\u0645).",
+    "source": "https://www.trade.gov/country-commercial-guides/egypt-labeling-marking-requirements ; https://www.eos.org.eg/en/standard/12797 ; https://archive.org/details/es.7266.3.2011 ; https://archive.org/details/es.7266.4.2011 ; https://www.trade.gov/textiles-and-apparel-market-report-egypt ; https://www.export2gulf.com/goeic-factory-registration-egypt-decision-43/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Common export-market label needs",
+    "detail": "EU: Regulation (EU) 1007/2011 fibre names and % in descending order in the language of the member state, durable label; care labelling voluntary but ISO 3758 symbols universal; (GPSR 2023/988 now requires manufacturer/importer name + address + product ID on product/packaging). UK: same as EU via Textile Products (Labelling and Fibre Composition) Regulations 2012. USA: Textile Fiber Products Identification Act - fibre content, country of origin on front of label, manufacturer name or RN; Care Labeling Rule 16 CFR 423 permanent care label; origin 'Made in Egypt' in English. GCC/Saudi (SASO/GSO): fibre content, care instructions and country of origin in Arabic (or Arabic+English); GSO 1956:2009 restricted substances. Practical: design a single 3-panel care label (Arabic / English + symbols / origin & RN placeholder) to cover Egypt, GCC, EU and US.",
+    "source": "https://www.compliancegate.com/textiles-labelling-requirements-european-union/ ; https://www.ftc.gov/business-guidance/resources/threading-your-way-through-labeling-requirements-under-textile-wool-acts ; https://www.ecfr.gov/current/title-16/chapter-I/subchapter-D/part-423 ; https://www.complianceandrisks.com/blog/what-you-need-to-know-about-the-technical-regulations-for-textiles-in-saudi-arabia/ ; https://www.gso.org.sa/store/standards/GSO:501672?lang=en",
+    "confidence": "high"
+   },
+   {
+    "topic": "Fashion-Incubator / Kathleen Fasanella position",
+    "detail": "Fashion-incubator.com returned 403 to fetch; from search snippets and prior knowledge: Fasanella distinguishes a 'spec sheet' (measurement chart + sketch) from a full 'tech pack', warns that oversized templated tech packs overwhelm small contractors, and stresses that the pattern + approved sample are the true production authority, with the tech pack recording the sample's measured specs and grade. Her practical advice for small brands: fewer, correct POMs with realistic tolerances beat long lists; give the factory the sewing sequence and finished seam allowances. Treat as medium confidence.",
+    "source": "https://fashion-incubator.com/what_is_a_tech_pack/ ; industry knowledge",
+    "confidence": "medium"
+   },
+   {
+    "topic": "MUST vs NICE for the prototype generator",
+    "detail": "MUST: header (style no., name, season, date, version, base size, size range, colorways, designer, status); product description & intended use; flats front/back/side + inside-out for reversible with lettered callouts; BOM (item, placement, description, composition, gsm, width, finish, supplier/ref placeholder, color ref TCX+hex, consumption/qty per unit, UoM, size-dependent flag); POM chart with code, how-to-measure, tolerance cm, S/M/L values, grade; construction ops with ISO 4915 stitch, ISO 4916 seam, SPI, SA mm, thread Tex, needle, pressing; topstitch spec; colorway matrix; label list with mandatory Arabic/English content and placement; basic packing (polybag, pcs/carton, carton marks); QC (AQL 2.5/4.0, key tests). NICE: cost sheet/target FOB, grading formulas per POM, detailed carton dimensions/board grade, embroidery/graphics page, sample-stage log with approver fields, fabric test standards list, fit comments history, marker/consumption yield, alternative suppliers, lab-dip approval tracking.",
+    "source": "synthesis of sources above",
+    "confidence": "high"
+   },
+   {
+    "topic": "Recommended JSON schema for the generated tech pack",
+    "detail": "techpack { meta { style_no, style_name, brand, season, product_category, gender, date_created, date_modified, version, status(draft|proto|fit|pp|approved), designer, tech_designer, fit_approver, base_size, size_range[], units:'cm', factory, country_of_origin }, product { description, intended_use, key_features[], reversible:bool, fit_notes, reference_images[] }, sketches [{ view(front|back|side|top|inside_out|detail|cross_section), image_url|svg, callouts[{ id, label, x, y, note }] }], bom [{ item_no, section(fabric|lining|trim|thread|label|packaging), placement, description, material_type, composition, construction, weight_gsm, weight_tol_pct, width_cm, finish, supplier, supplier_ref, color_by_colorway{ cw_code: { color_name, pantone_tcx, hex, labdip_status } }, consumption_per_unit, uom, wastage_pct, size_dependent:bool, size_values{ S,M,L }, test_requirements[], notes }], measurements { base_size, tolerance_default_cm, poms [{ code, name, how_to_measure, method(straight|curve|half_circ|full_circ), tolerance_minus_cm, tolerance_plus_cm, values{ S, M, L }, grade_rule_cm, critical:bool, sketch_ref }] }, construction { seam_allowance_default_mm, thread_default{ tex, type, needle_nm }, operations [{ op_no, name, components[], seam_type_iso4916, stitch_type_iso4915, spi, seam_allowance_mm, thread{ tex, color_ref }, needle_nm, machine, topstitch{ rows, distance_from_edge_mm, spacing_mm, spi, thread_tex }, pressing, notes, sketch_ref }], general_workmanship_notes[] }, colorways [{ cw_code, name, components{ bom_item_no: { color_name, pantone_tcx, hex } }, sketch_ref }], labels [{ type(main|size|care_content|origin|hangtag|sticker), material, size_mm, fold, placement, content{ ar, en, symbols_iso3758[] }, attach_method, colorway_variants }], packaging { fold_method, polybag{ material, size_mm, thickness_mm, warning_text, sticker_fields[] }, inner_pack_qty, carton{ type, board, dims_cm, max_gross_kg, assortment_ratio, marks[] } }, quality { aql{ standard:'ISO 2859-1', level:'GII', major:2.5, minor:4.0, critical:0 }, measurement_audit, tests[{ property, standard, requirement }], defect_list[] }, compliance { markets[], egypt{ es_7266_parts[], arabic_label_required:true, es_1405_care:true }, eu_1007_2011:bool, us_ftc:bool, gso_saso:bool }, samples [{ stage(proto|fit|size_set|pp|top), date, size, comments, deviations[], approved:bool, approver }], costing { fabric, trims, cmt, packaging, target_fob, currency }, revisions [{ version, date, author, changes[], approver }] }",
+    "source": "synthesis; column conventions from Sewport, Techpacker, Apparel Entrepreneurship, Specter OS",
+    "confidence": "high"
+   }
+  ],
+  "recommendations": [
+   "Implement the tech pack as the schema above and render it in the canonical order: header -> product description -> flats -> BOM -> POM chart -> construction -> colorways -> labels/packaging -> QC/compliance -> samples/revisions; keep costing and sample log as optional collapsed sections in the prototype.",
+   "Hard-code the headwear POM library for bucket hats (A inside circumference full-circ, B crown/side-band height, C crown tip diameter, D brim width, E total height, F brim edge circumference, G topstitch offset) with defaults S/M/L = 56/58/60 cm circumference (+/-1.0), 9.0-9.5 cm crown height (+/-0.5), 17.2 cm tip diameter base (+/-0.5), 6.0/6.0/6.5 cm brim (+/-0.5), and let the LLM adjust from the sketch/description rather than invent codes.",
+   "Encode a construction template per product type: for the bucket hat, 301 lockstitch, 10-12 SPI seaming, 8 SPI single-row brim edge topstitch 5 mm from edge, 10 mm SA, Tex 27-30 seaming / Tex 40 topstitch, needle Nm 80-90, tonal thread per shell, and an explicit reversible-assembly sequence (two complete shells, join at brim edge, turn, close, stitch-in-ditch tack).",
+   "Always emit color references as Pantone TCX + hex (Khaki 16-0726 TCX #A39264, Jet Black 19-0303 TCX #2D2C2F) and a BOM-by-colorway matrix so the factory can cut CW1 and CW2 from the same two fabric lots.",
+   "Generate a bilingual Arabic/English care-content label block by default for Egyptian brands: fibre % in Arabic and English, ISO 3758 symbols with Arabic care text (ES 1405/2014), '\u0635\u0646\u0639 \u0641\u064a \u0645\u0635\u0631 / Made in Egypt', manufacturer name and address, size in cm; flag that ES 7266-3/2023 is obligatory and that labels must be sewn in at the factory (no post-hoc stickers).",
+   "Include a compact QC block: ISO 2859-1 GII, AQL 2.5 major / 4.0 minor, measurement audit of 10 pcs per size, tests for gsm +/-5%, shrinkage <=3%, colorfastness to wash/rub; plus a proto -> fit -> PP -> TOP sample checklist with approver fields.",
+   "Mark all factory-dependent values (supplier refs, lab-dip numbers, exact consumption, carton dims) as 'TBC by factory' placeholders instead of hallucinated numbers, and show a confidence/assumption note per section so the user can review before sending to a masdrmena supplier.",
+   "Validate the generated POM chart programmatically: sizes must increase monotonically by the grade rule, tolerances present in cm, tip diameter consistent with circumference, and every POM code must appear as a callout on a sketch."
+  ],
+  "open_questions": [
+   "Target markets for the first run: Egypt only, or also GCC/EU/US export? This decides whether the label block needs RN/EN/UK fields beyond Arabic+English.",
+   "Does the brand want a brand/main woven label on the reversible hat, and if so on which side (or a double-sided label in the brim seam)?",
+   "Should the size run be labelled S/M/L only, or S/M/L with cm (56/58/60) per EN 13402 practice?",
+   "Is the 280 gsm twill to be pre-shrunk/sanforized or will the factory pre-wash? This changes the pattern allowance and the shrinkage test requirement.",
+   "Preferred units for the factory: cm only, or cm with inches for export buyers?",
+   "Will the generator need cost-sheet output (fabric price, CMT, target FOB) in v1, or is it out of scope for the prototype?",
+   "Do you want the prototype to output the tech pack as JSON only, or also a rendered PDF/HTML page for the factory?"
+  ]
+ },
+ "v2:e097dcc2869e91267420efc6cf0d5b9d0295cbde028e479ba0a3a745f16039cb": {
+  "summary": "Recommended path: one EC2 t4g.small (2 vCPU/2 GiB Graviton, Ubuntu 24.04 arm64) in eu-central-1 (Frankfurt), bootstrapped entirely by cloud-init user-data, fronted by Caddy for automatic Let's Encrypt/ZeroSSL TLS on masdr-proto.thegentek.com, with an Elastic IP, an instance profile (no long-lived keys on the box) for S3 + SSM, SSM Session Manager instead of SSH, SQLite on the root gp3 volume for metadata and S3 for uploads/generated packs, all in Terraform 1.15 with the S3 backend (native lockfile, no DynamoDB). It is the only option that (a) needs no container image (WSL2 has no docker), (b) has no 29s/30s gateway or 6 MB payload ceilings for 10 MB uploads and 60-120 s LLM calls, (c) needs only one manual DNS record at GoDaddy (A record masdr-proto -> EIP), and (d) works identically in eu-north-1 if you stay there. Frankfurt is chosen over Stockholm for ~18 ms better RTT from Cairo (68 ms vs 86 ms measured) and much broader service availability (App Runner, Bedrock EU inference); Stockholm is ~10% cheaper on compute. All-in cost is roughly $20/month in Frankfurt ($18 in Stockholm). Lambda+Function URL (RESPONSE_STREAM, 15 min timeout, 200 MB streamed response) behind CloudFront+ACM is the credible serverless runner-up at ~$1-5/month but adds CloudFront/ACM(us-east-1)/OAC plumbing, presigned-S3 uploads (6 MB sync request cap), and keepalive streaming to survive CloudFront's 30 s (max 120 s) per-packet origin timeout. Fargate needs CodeBuild for image builds plus an ALB (~$40/month total); Amplify Hosting SSR is ruled out by its 30 s compute timeout and 5.72 MB response cap; Lightsail ($12/month flat, available in both regions) is a fine budget fallback but cannot attach IAM roles, so S3 access would need static keys on the box.",
+  "findings": [
+   {
+    "topic": "App Runner region availability",
+    "detail": "App Runner is not available in eu-north-1 (Stockholm); it is available in eu-central-1 (Frankfurt) since 2023-03-01, plus London/Paris/Mumbai since 2023-11-08. If you want a managed source-to-URL service it exists only if you move to Frankfurt; note its request timeout is 120 s max, marginal for 60-120 s generations.",
+    "source": "https://docs.aws.amazon.com/apprunner/latest/relnotes/release-2023-03-01-new-regions.html ; https://github.com/aws/apprunner-roadmap/issues/155",
+    "confidence": "high"
+   },
+   {
+    "topic": "Latency from Cairo to candidate regions (WonderNetwork, measured 2026-09-02)",
+    "detail": "Cairo->Frankfurt 67.8 ms, Cairo->Dublin 70.9 ms, Cairo->Stockholm 85.6 ms, Cairo->Milan 50.0 ms, Cairo->Tel Aviv 82.2 ms, Cairo->Manama (Bahrain) 109.7 ms, Cairo->Dubai 351 ms (routing anomaly). Frankfurt beats Stockholm by ~18 ms; Milan (eu-south-1) is closest but is an opt-in region with fewer services. Region RTT is negligible versus 30-120 s LLM latency; pick on service availability.",
+    "source": "https://wondernetwork.com/pings/Cairo",
+    "confidence": "high"
+   },
+   {
+    "topic": "EC2 t4g.small on-demand price by region",
+    "detail": "t4g.small (2 vCPU Graviton2, 2 GiB, up to 5 Gbps): eu-central-1 $0.0192/h ($14.02/mo at 730 h), eu-north-1 $0.0172/h ($12.56/mo), eu-west-1 $0.0184/h, il-central-1 $0.0193/h. Add public IPv4 $0.005/h ($3.65/mo, charged since 2024-02-01 for every public IPv4 incl. EIP) and ~20 GB gp3 root (~$1.9/mo Frankfurt). Total EC2 path ~ $20/mo Frankfurt, ~ $18/mo Stockholm.",
+    "source": "https://sparecores.com/server/aws/t4g.small ; https://aws.amazon.com/blogs/networking-and-content-delivery/identify-and-optimize-public-ipv4-address-usage-on-aws/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Lambda hard limits relevant to this app",
+    "detail": "Sync invocation payload 6 MB request / 6 MB response (BUFFERED); streamed response up to 200 MB (RESPONSE_STREAM, first 6 MB uncapped then 2 MB/s); function timeout 900 s; /tmp 512 MB-10 GB; zip 50 MB / 250 MB unzipped; memory 128 MB-10,240 MB (1 vCPU at 1,769 MB). Consequence: a 10 MB image upload cannot go through a Function URL body; use a presigned S3 PUT (browser -> S3) and pass the key to the function.",
+    "source": "https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "Lambda Function URL: streaming, timeout, custom domain",
+    "detail": "Function URLs use https://<id>.lambda-url.<region>.on.aws, are only public-internet, support CORS, auth NONE or AWS_IAM, and InvokeMode BUFFERED (6 MB) or RESPONSE_STREAM (200 MB, InvokeWithResponseStream). They do NOT support custom domain names; AWS docs point to API Gateway for custom domains, or you put CloudFront in front (CloudFront OAC for Lambda URL origins, GA 2024-04, requires AuthType AWS_IAM + lambda:InvokeFunctionUrl permission). Terraform: aws_lambda_function_url { authorization_type = \"AWS_IAM\" invoke_mode = \"RESPONSE_STREAM\" }.",
+    "source": "https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html ; https://docs.aws.amazon.com/lambda/latest/dg/config-rs-invoke-furls.html ; https://docs.aws.amazon.com/lambda/latest/dg/furls-http-invoke-decision.html ; https://aws.amazon.com/about-aws/whats-new/2024/04/amazon-cloudfront-oac-lambda-function-url-origins",
+    "confidence": "high"
+   },
+   {
+    "topic": "CloudFront origin timeouts (matters for Lambda-behind-CloudFront)",
+    "detail": "Origin response (read) timeout: default 30 s, adjustable 1-120 s (quota increase beyond). It is a per-packet idle timeout, so a RESPONSE_STREAM Lambda that emits SSE/heartbeat bytes at least every ~25 s survives a 120 s generation; a silent buffered call does not. Optional 'response completion timeout' caps total; if unset there is no max. Request body limit 64 GB (not a constraint). ACM cert for a CloudFront alias must be issued in us-east-1.",
+    "source": "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesOrigin.html ; https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-limits.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "API Gateway timeouts and payload caps",
+    "detail": "HTTP API: max integration timeout 30 s (not increasable), payload 10 MB. REST API: 29 s default; since 2024-06-04 you can raise it above 29 s for Regional and private REST APIs via Service Quotas (up to ~300 s), possibly at the cost of a lower account throttle quota; payload still 10 MB. API Gateway now also supports Lambda proxy response streaming (InvokeWithResponseStream, special output format with 8-null-byte delimiter). Verdict: API GW adds cost/complexity over a Function URL for no benefit here.",
+    "source": "https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-quotas.html ; https://aws.amazon.com/about-aws/whats-new/2024/06/amazon-api-gateway-integration-timeout-limit-29-seconds/ ; https://docs.aws.amazon.com/apigateway/latest/developerguide/response-transfer-mode-lambda.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "Lambda Web Adapter (run Express/FastAPI/Next unchanged on Lambda, zip packaging, no docker)",
+    "detail": "Attach layer arn:aws:lambda:<region>:753240598075:layer:LambdaAdapterLayerArm64:28 (or LambdaAdapterLayerX86:28), set AWS_LAMBDA_EXEC_WRAPPER=/opt/bootstrap, handler = run.sh that starts your server on AWS_LWA_PORT (default 8080), AWS_LWA_INVOKE_MODE=response_stream, readiness check path/port. Docker alternative: COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 /lambda-adapter /opt/extensions/lambda-adapter. FastAPI + Bedrock streaming example exists in repo.",
+    "source": "https://github.com/awslabs/aws-lambda-web-adapter ; https://github.com/awslabs/aws-lambda-web-adapter/tree/main/examples/fastapi-response-streaming",
+    "confidence": "high"
+   },
+   {
+    "topic": "Lambda cost for this workload",
+    "detail": "$0.20 per 1M requests; $0.0000166667 per GB-s (x86; arm64 ~20% less); free tier 1M requests + 400,000 GB-s/month. 1,000 generations x 90 s x 1 GB = 90,000 GB-s -> within free tier; beyond it ~$1.50 per 1,000 generations. Realistic Lambda+CloudFront+S3 prototype: $1-5/month.",
+    "source": "https://aws.amazon.com/lambda/pricing/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Amplify Hosting SSR limits (rule-out)",
+    "detail": "Next.js SSR compute has a 30 s request timeout (long-standing open issue #3223/#3475), max response 5.72 MB (504 on exceed), build output 220 MB, Node 20+ required. A 60-120 s generation route cannot run there without offloading to another backend, which defeats the point.",
+    "source": "https://docs.aws.amazon.com/amplify/latest/userguide/troubleshooting-SSR.html ; https://github.com/aws-amplify/amplify-hosting/issues/3223",
+    "confidence": "high"
+   },
+   {
+    "topic": "ECS Fargate path: building an image without a local docker daemon",
+    "detail": "Use CodeBuild with an S3 zip as source (uploadable with the existing S3-only user), privileged mode on, arm1.small ($0.005/min, 100 free min/month on general1.small/arm1.small), buildspec: aws ecr get-login-password | docker login; docker build --platform linux/arm64; docker push. Nixpacks/pack need a docker daemon (not usable in this WSL2); ko is Go-only; GitHub Actions is the other daemon-free route. Fargate itself: ~$0.04048/vCPU-h + $0.004445/GB-h us-east-1, EU 10-30% higher, ARM 20% cheaper; 0.5 vCPU/1 GB ARM in Frankfurt ~ $15-17/mo, plus an ALB (~EUR 0.0266/h base in Frankfurt, ~$20-25/mo) for ACM TLS -> ~$40/mo and ~4x the IAM/Terraform surface of the EC2 path.",
+    "source": "https://aws.amazon.com/codebuild/pricing/ ; https://docs.aws.amazon.com/codepipeline/latest/userguide/tutorials-ecr-build-publish.html ; https://aws.eu/elasticloadbalancing/pricing/ ; https://cloudchipr.com/blog/aws-fargate-pricing",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Lightsail as budget fallback",
+    "detail": "Available in both eu-north-1 and eu-central-1. $12/mo bundle = 2 vCPU, 2 GB RAM, 60 GB SSD, 3 TB transfer, static IP included (free while attached; $0.005/h if idle); $7 = 1 GB RAM. Drawback: no IAM instance profile, so the app needs static access keys (or a Lightsail bucket) to reach S3, and SSM Session Manager is not native; Terraform aws_lightsail_instance supports user_data. Load balancer $18/mo (not needed with Caddy).",
+    "source": "https://docs.aws.amazon.com/lightsail/latest/userguide/understanding-regions-and-availability-zones-in-amazon-lightsail.html ; https://aws.amazon.com/lightsail/pricing/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Caddy automatic HTTPS behaviour (recommended TLS approach)",
+    "detail": "Caddy 2 (apt via dl.cloudsmith.io caddy/stable repo, runs as systemd unit 'caddy') obtains certs from Let's Encrypt and automatically fails over to ZeroSSL, retries with exponential backoff up to 30 days, renews in the background, redirects HTTP->HTTPS, and stores certs under /var/lib/caddy. Requirements: A/AAAA record pointing at the box, ports 80 and 443 open, persistent data dir. Let's Encrypt duplicate-cert limit is 5 per exact name set per 7 days, so avoid repeatedly destroying/recreating the instance in one week (ZeroSSL fallback usually rescues you anyway). No ACM, ALB, or CloudFront needed; reverse_proxy has no response timeout by default, so 120 s LLM calls pass through; set request_body max_size 20MB.",
+    "source": "https://caddyserver.com/docs/automatic-https ; https://caddyserver.com/docs/install ; https://letsencrypt.org/docs/rate-limits/",
+    "confidence": "high"
+   },
+   {
+    "topic": "ACM DNS validation with GoDaddy DNS (only if you choose ALB/CloudFront)",
+    "detail": "ACM emits one CNAME per name: _<32hex>.masdr-proto.thegentek.com -> _<32hex>.acm-validations.aws. Enter only the '_<hex>.masdr-proto' part in GoDaddy's Name field (it appends the zone). Validation typically <30 min, times out after 72 h; the CNAME must stay in place for auto-renewal and is reusable across regions (CloudFront needs the cert in us-east-1). Works with any third-party DNS.",
+    "source": "https://docs.aws.amazon.com/acm/latest/userguide/dns-validation.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "GoDaddy DNS API access and record call",
+    "detail": "GoDaddy's 2024 restriction (10+ domains) was lifted in April 2026: DNS/Domain Management API needs just 1 domain in the account; keys from developer.godaddy.com/keys (separate OTE/prod); 60 req/min, 20k/month. Replace-record call: PUT https://api.godaddy.com/v1/domains/thegentek.com/records/A/masdr-proto with header 'Authorization: sso-key KEY:SECRET' and body [{\"data\":\"<EIP>\",\"ttl\":600}] (min TTL 600). Terraform provider veksh/godaddy-dns (resource godaddy-dns_record) works but is unmaintained. Manual entry in the GoDaddy DNS UI is equally fine for one record.",
+    "source": "https://www.godaddy.com/resources/news/godaddy-dns-api-now-works-with-a-single-domain ; https://developer.godaddy.com/docs/references/rest/domains/v1 ; https://github.com/veksh/terraform-provider-godaddy-dns",
+    "confidence": "high"
+   },
+   {
+    "topic": "Exact DNS record to create at GoDaddy (recommended path)",
+    "detail": "Type A, Name 'masdr-proto', Value = the Elastic IP output by Terraform, TTL 600. Do not CNAME to the ec2-*.compute.amazonaws.com name (changes on stop/start) and do not add AAAA unless you also assign an IPv6 address to the instance (Caddy would try to validate over it). If you instead pick Lambda+CloudFront: Type CNAME, Name 'masdr-proto', Value d<hash>.cloudfront.net, plus the ACM validation CNAME. ALB: CNAME to <name>.eu-central-1.elb.amazonaws.com plus ACM CNAME. The apex 216.198.79.193 (Vercel) is untouched.",
+    "source": "industry knowledge (record format); https://docs.aws.amazon.com/acm/latest/userguide/dns-validation.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "EC2 user-data facts for the bootstrap",
+    "detail": "User data runs as root on first boot only (cloud-init), 16 KB raw limit, output in /var/log/cloud-init-output.log, script copied to /var/lib/cloud/instances/<id>/. Terraform aws_instance user_data (or user_data_base64) handles encoding. Use '#cloud-config' with packages/write_files/runcmd, and keep the app payload out of user-data (pull a release zip from S3 instead) to stay under 16 KB. Ubuntu 24.04 arm64 AMI via SSM public parameter /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id (data aws_ssm_parameter in Terraform; needs ssm:GetParameter).",
+    "source": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html ; https://ubuntu.com/aws/docs/aws-how-to/instances/find-ubuntu-images/",
+    "confidence": "high"
+   },
+   {
+    "topic": "SSM Session Manager instead of SSH",
+    "detail": "Needs SSM Agent >= 2.3.68.0 (preinstalled as a snap on Canonical Ubuntu AMIs and on AL2023), an instance profile with AmazonSSMManagedInstanceCore, outbound 443 to ssm/ssmmessages/ec2messages.<region>.amazonaws.com, and the session-manager-plugin installed locally on WSL2 for 'aws ssm start-session'. Lets you close port 22 entirely; 'aws ssm send-command --document-name AWS-RunShellScript' is the deploy hook.",
+    "source": "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-prerequisites.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "Minimum IAM for the recommended EC2+Terraform path (new IAM user or role; the current S3-only user cannot create it)",
+    "detail": "Deployer policy, region-scoped to eu-central-1 where possible: ec2:Describe* (Instances, Images, Vpcs, Subnets, SecurityGroups, Addresses, InstanceAttribute, InstanceTypes, Tags, Volumes, NetworkInterfaces, InstanceCreditSpecifications), ec2:RunInstances, TerminateInstances, StopInstances, StartInstances, ModifyInstanceAttribute, CreateTags, DeleteTags, CreateSecurityGroup, DeleteSecurityGroup, AuthorizeSecurityGroupIngress/Egress, RevokeSecurityGroupIngress/Egress, AllocateAddress, AssociateAddress, DisassociateAddress, ReleaseAddress; iam:CreateRole, DeleteRole, GetRole, TagRole, AttachRolePolicy, DetachRolePolicy, PutRolePolicy, DeleteRolePolicy, GetRolePolicy, ListRolePolicies, ListAttachedRolePolicies, ListInstanceProfilesForRole, CreateInstanceProfile, DeleteInstanceProfile, GetInstanceProfile, AddRoleToInstanceProfile, RemoveRoleFromInstanceProfile, iam:PassRole (Resource = the one instance role ARN); ssm:GetParameter(s) on arn:aws:ssm:eu-central-1::parameter/aws/service/canonical/* and arn:aws:ssm:eu-central-1:<acct>:parameter/masdr-proto/*, ssm:PutParameter/DeleteParameter on /masdr-proto/*, ssm:StartSession, TerminateSession, SendCommand, GetCommandInvocation, DescribeInstanceInformation, ListCommandInvocations; s3:CreateBucket, DeleteBucket, GetBucket*, PutBucketPolicy, PutBucketPublicAccessBlock, PutBucketVersioning, PutBucketCors, PutLifecycleConfiguration, PutEncryptionConfiguration, ListBucket, GetObject, PutObject, DeleteObject on the app bucket and the tfstate bucket. Instance role: AmazonSSMManagedInstanceCore + s3:GetObject/PutObject/ListBucket on the app bucket + ssm:GetParameter on /masdr-proto/* (+ kms:Decrypt on alias/aws/ssm for SecureString) + bedrock:InvokeModel/InvokeModelWithResponseStream if Bedrock is the LLM.",
+    "source": "industry knowledge; https://docs.aws.amazon.com/prescriptive-guidance/latest/terraform-aws-provider-best-practices/security.html",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Minimum IAM for the alternative paths",
+    "detail": "Lambda+CloudFront: lambda:CreateFunction, UpdateFunctionCode, UpdateFunctionConfiguration, GetFunction, GetFunctionConfiguration, DeleteFunction, ListVersionsByFunction, PublishVersion, CreateAlias/UpdateAlias, Create/Update/Get/DeleteFunctionUrlConfig, AddPermission, RemovePermission, GetPolicy, PutFunctionConcurrency, TagResource, GetLayerVersion (on arn:aws:lambda:*:753240598075:layer:*); iam role CRUD + PassRole for the execution role (AWSLambdaBasicExecutionRole + s3/dynamodb); logs:CreateLogGroup, PutRetentionPolicy, DescribeLogGroups, DeleteLogGroup; cloudfront:CreateDistribution, UpdateDistribution, GetDistribution, GetDistributionConfig, DeleteDistribution, TagResource, ListTagsForResource, CreateOriginAccessControl, GetOriginAccessControl, DeleteOriginAccessControl, GetCachePolicy, GetOriginRequestPolicy, CreateInvalidation; acm (us-east-1): RequestCertificate, DescribeCertificate, DeleteCertificate, AddTagsToCertificate, ListTagsForCertificate; s3 bucket + CORS as above; optional dynamodb:CreateTable/DescribeTable/UpdateTable/DeleteTable/TagResource/ListTagsOfResource + runtime PutItem/GetItem/Query/UpdateItem. Fargate: all of the above bucket/logs perms plus ecr:CreateRepository/Describe*/GetAuthorizationToken/Batch*/PutImage/InitiateLayerUpload/UploadLayerPart/CompleteLayerUpload/DeleteRepository, codebuild:CreateProject/UpdateProject/DeleteProject/BatchGetProjects/StartBuild/BatchGetBuilds, ecs:CreateCluster/DeleteCluster/Describe*/RegisterTaskDefinition/DeregisterTaskDefinition/CreateService/UpdateService/DeleteService/TagResource, elasticloadbalancing:* (CreateLoadBalancer, CreateTargetGroup, CreateListener, Modify*, Describe*, Delete*, AddTags), acm in-region, ec2 VPC/SG Describe+CreateSecurityGroup etc., iam roles for CodeBuild service role (AmazonEC2ContainerRegistryPowerUser + logs), ecsTaskExecutionRole (AmazonECSTaskExecutionRolePolicy) and task role. Lightsail: lightsail:CreateInstances, GetInstance(s), DeleteInstance, AllocateStaticIp, AttachStaticIp, ReleaseStaticIp, GetStaticIp(s), PutInstancePublicPorts, OpenInstancePublicPorts, GetInstanceAccessDetails, CreateKeyPair, TagResource, GetRegions, GetBlueprints, GetBundles (+ an IAM user access key for S3 from inside the instance). Amplify: amplify:* on the app + iam:CreateServiceLinkedRole + a GitHub connection.",
+    "source": "industry knowledge; https://docs.aws.amazon.com/codepipeline/latest/userguide/tutorials-ecr-build-publish.html",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Terraform state without DynamoDB",
+    "detail": "Terraform >= 1.10 supports S3 backend native locking (use_lockfile = true), so with Terraform 1.15 the existing S3-only credentials are enough for state; no dynamodb permissions required. Key suggestion: bucket=<existing>, key=masdr-proto/terraform.tfstate, region=eu-central-1, encrypt=true.",
+    "source": "industry knowledge (Terraform 1.10 release notes)",
+    "confidence": "high"
+   },
+   {
+    "topic": "Bedrock in EU regions (only if Bedrock is the LLM)",
+    "detail": "Anthropic Claude models are offered in Europe via EU cross-region inference profiles that include Frankfurt, Ireland, Paris and Stockholm (Claude 3.7 Sonnet announced 2025-04; newer models follow the same EU profile pattern). Frankfurt lists more Bedrock models/deployment types than Stockholm. If you call the Anthropic API directly, region is irrelevant to the LLM.",
+    "source": "https://aws.amazon.com/about-aws/whats-new/2025/04/anthropics-claude-3-7-sonnet-amazon-bedrock-europe/ ; https://docs.aws.amazon.com/bedrock/latest/userguide/models-region-compatibility.html",
+    "confidence": "medium"
+   }
+  ],
+  "recommendations": [
+   "Choose Path A: EC2 t4g.small + Caddy + cloud-init, Terraform-managed, in eu-central-1. Rationale: no container build, no gateway timeouts, direct 10 MB multipart uploads through Caddy, SQLite on disk, instance-profile credentials, one A record at GoDaddy, ~$20/month. Keep the same Terraform if you later decide to stay in eu-north-1 (only price and RTT change).",
+   "Runbook step 0 (account admin, one-off): create IAM user 'masdr-proto-deployer' (or a role assumed via 'aws sts assume-role') with the EC2-path policy listed in findings; 'aws configure --profile masdr' on WSL2; export AWS_REGION=eu-central-1; install session-manager-plugin .deb (sudo dpkg -i session-manager-plugin.deb).",
+   "Step 1 (Terraform backend): terraform { backend \"s3\" { bucket = \"<existing-bucket>\" key = \"masdr-proto/terraform.tfstate\" region = \"eu-central-1\" encrypt = true use_lockfile = true } }. Provider aws region eu-central-1, default_tags Project=masdr-proto.",
+   "Step 2 (Terraform resources): data aws_ssm_parameter ubuntu { name = \"/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id\" }; aws_default_vpc + default subnet; aws_security_group ingress 80 and 443 from 0.0.0.0/0 and ::/0, no 22, egress all; aws_iam_role + aws_iam_instance_profile with AmazonSSMManagedInstanceCore and an inline policy for s3:GetObject/PutObject/ListBucket on the app bucket and ssm:GetParameter on arn:aws:ssm:eu-central-1:<acct>:parameter/masdr-proto/*; aws_s3_bucket 'masdr-proto-data-<acct>' with public access block, SSE-S3, lifecycle expiring uploads/ after 30 days; aws_ssm_parameter '/masdr-proto/ANTHROPIC_API_KEY' type SecureString (pass via TF_VAR, or write with 'aws ssm put-parameter' outside Terraform to keep it out of state); aws_instance t4g.small, ami = data.aws_ssm_parameter.ubuntu.value, root_block_device gp3 20 GB, metadata_options http_tokens = \"required\", user_data = templatefile(\"cloud-init.yaml\", { domain, bucket, region }); aws_eip + aws_eip_association; output eip.",
+   "Step 3 (cloud-init.yaml, < 16 KB): #cloud-config; packages: unzip, curl, ca-certificates, debian-keyring, debian-archive-keyring, apt-transport-https, (nodejs via NodeSource 22.x in runcmd, or python3-venv); write_files: /etc/caddy/Caddyfile = 'masdr-proto.thegentek.com { encode gzip; request_body { max_size 20MB }; reverse_proxy 127.0.0.1:8080 }' (add 'basic_auth { user hash }' to gate the prototype); /etc/systemd/system/masdr.service (User=masdr, WorkingDirectory=/opt/masdr/current, EnvironmentFile=/etc/masdr/env, ExecStart=/usr/bin/node server.js, Restart=always, RestartSec=3); /usr/local/bin/masdr-deploy (aws s3 cp s3://<bucket>/releases/latest.zip /tmp; unzip to /opt/masdr/releases/<ts>; npm ci --omit=dev; ln -sfn to /opt/masdr/current; systemctl restart masdr); runcmd: add Caddy cloudsmith repo (curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg; curl -1sLf .../debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list; apt update; apt install -y caddy awscli), useradd masdr, write /etc/masdr/env from 'aws ssm get-parameter --with-decryption' (chmod 600, PORT=8080, S3_BUCKET, AWS_REGION), /usr/local/bin/masdr-deploy, systemctl enable --now masdr caddy, enable unattended-upgrades.",
+   "Step 4 (first apply order to avoid burning Let's Encrypt attempts): terraform apply -target=aws_eip.app -> create the GoDaddy A record masdr-proto -> <EIP> TTL 600 (UI, or PUT https://api.godaddy.com/v1/domains/thegentek.com/records/A/masdr-proto with 'Authorization: sso-key KEY:SECRET' and body [{\"data\":\"<EIP>\",\"ttl\":600}]) -> upload the first release zip to s3://<bucket>/releases/latest.zip (works with today's S3-only creds) -> terraform apply (full). Caddy retries automatically if DNS is still propagating.",
+   "Step 5 (verify): dig +short masdr-proto.thegentek.com; curl -I https://masdr-proto.thegentek.com; aws ssm start-session --target <instance-id> then 'journalctl -u caddy -u masdr -n 200' and 'tail /var/log/cloud-init-output.log'.",
+   "Step 6 (deploy loop, no docker, no SSH): zip -r release.zip . -x 'node_modules/*' '.git/*' && aws s3 cp release.zip s3://<bucket>/releases/latest.zip && aws ssm send-command --document-name AWS-RunShellScript --targets Key=tag:Name,Values=masdr-proto --parameters 'commands=[\"/usr/local/bin/masdr-deploy\"]' ; poll with aws ssm get-command-invocation.",
+   "App-shape guidance for either path: make POST /generate return a job id immediately and stream progress over SSE (or poll GET /jobs/{id}), persisting the job row in SQLite (EC2) or DynamoDB/S3 JSON (Lambda), so a browser refresh or proxy hiccup during a 120 s generation does not lose the result; write the finished tech pack (JSON + rendered PDF/XLSX) to s3://<bucket>/packs/<job>/ and serve via presigned GET.",
+   "Robustness add-ons worth their cost: EBS daily snapshot via aws_dlm_lifecycle_policy (needs dlm:* + ec2:CreateSnapshot in the deployer policy), CloudWatch agent for disk/mem alarms, an aws_budgets_budget alert at $30, and IMDSv2-only. Do not run terraform destroy/apply of the instance more than a few times per week (Let's Encrypt duplicate-cert limit 5/week; ZeroSSL fallback exists).",
+   "If you later want zero-idle-cost: Path B = Lambda (arm64, 2048 MB, 300 s timeout) + Lambda Web Adapter layer (LambdaAdapterLayerArm64:28, AWS_LWA_INVOKE_MODE=response_stream) + Function URL (AWS_IAM, RESPONSE_STREAM) + CloudFront (OAC lambda origin, response timeout raised to 120 s, ACM cert in us-east-1, alias masdr-proto.thegentek.com -> CNAME d<hash>.cloudfront.net at GoDaddy) + presigned S3 PUT uploads (6 MB sync cap) + SSE heartbeats every <=25 s. Skip API Gateway entirely (30 s HTTP API hard cap; REST needs a quota exception).",
+   "Do not choose Amplify Hosting (30 s SSR timeout, 5.72 MB response cap) or Fargate for this prototype (CodeBuild image pipeline + ALB pushes cost to ~$40/month and IAM surface up 4x with no functional gain at one instance). Lightsail $12/month is acceptable only if the budget, not credential hygiene, is the binding constraint."
+  ],
+  "open_questions": [
+   "Who in the AWS account can create the new IAM user/role (the current user has no iam:* rights) and do they prefer a long-lived user with access keys or an assumable role with MFA?",
+   "Is the LLM called via the Anthropic API directly or via Amazon Bedrock? (Bedrock changes the instance-role policy and makes eu-central-1 a stronger choice; direct API makes region irrelevant to the model.)",
+   "Node.js or Python for the app? (Decides NodeSource vs python3-venv in cloud-init and the systemd ExecStart; the Lambda Web Adapter fallback supports both.)",
+   "Do you have (or can you get) GoDaddy API keys for thegentek.com, or will the A record be added manually in the GoDaddy DNS UI? Who owns that GoDaddy account?",
+   "Should the prototype be gated (Caddy basic_auth or a shared link token) before Egyptian brand users see it, and is there any data-residency requirement for uploaded product photos that would rule out EU regions?",
+   "Expected concurrency for demos (a single t4g.small comfortably handles ~10 simultaneous I/O-bound generations; more needs t4g.medium or the Lambda path)?",
+   "Is a monthly ceiling of roughly $20-25 acceptable, or is the target closer to $0 idle (which would favour the Lambda path despite its extra plumbing)?",
+   "Do you want to keep eu-north-1 for account-default consistency (everything in the runbook works there; -$1.50/month, +18 ms RTT, no App Runner) or switch the prototype to eu-central-1 as recommended?"
+  ]
+ },
+ "v2:4726761704c0f9ba8da2d4678a68b609a02a6751518d5b8785ed12d446c5bc1d": {
+  "summary": "A reversible cotton-twill bucket hat is built as two complete self-fabric shells (each = 1 top circle + 2 side-band panels + 2 half-annulus brim panels), joined right-sides-together around the brim outer edge, turned through a 6-8 cm gap, and locked with the brim topstitch; there is no separate lining, no sweatband, and normally no metal eyelets. Verified adult sizing for the S/M/L test case is head 54-56/56-58/58-60 cm with finished inside circumference 57/59/61 cm (1 cm ease, 2 cm grade), crown height at side 8.5/9.0/9.5 cm, top-circle diameter ~17.4/18.0/18.6 cm and a 6.5 cm brim (brim outer circumference ~98/100/102 cm). Fabric: 100% cotton 3/1 twill 20x16 / 128x60, 270-280 gsm (~8.3 oz/yd\u00b2), 147-150 cm wide, sanforized (residual shrinkage <=3%), ~0.20 m of each colour per hat at 150 cm width. Sewing is 301 lockstitch on DBx1 Nm 80-90 with Tex 27-30 (Tkt 120/100) core-spun poly for seaming and Tex 40 (Tkt 75/80) on Nm 90-100 for the single brim topstitch at 6 mm from the edge, 10-12 SPI (Coats spec: 12-14 st/3 cm); needle thread khaki / bobbin black so each face shows its own colour. With only one topstitch row at 2 x 280 gsm the brim is soft, so spec a 50-70 gsm woven fusible on one brim (cut on bias, trimmed out of the seam allowance) or accept a packable brim. No published headwear SAM exists; an operation-based estimate is ~11-13 sewing SAM (~15 min incl. finishing/packing). Key tech-pack insight: the two stated colourways are physically the same hat unless the brand label side or a detail differentiates them.",
+  "findings": [
+   {
+    "topic": "Pattern pieces and reversible construction principle",
+    "detail": "Each shell = 3 pattern pieces: (1) crown tip/top circle x1, (2) side crown/band x2 (seamed at left and right sides; some patterns cut it as 1 piece with a CB seam), (3) brim half-annulus x2 cut on fold/seamed at sides so brim seams align with band seams. A reversible hat is two full self-fabric shells (Fabric A khaki, Fabric B black) - no separate lining, no sweatband. Shells are joined only at the brim outer edge; the crowns float independently. Pattern blogs (AppleGreen, Peekaboo, Hello Sewing, Spoonflower) all use 1 cm (3/8 in) SA; Merchant & Mills industrial-style pattern also 1 cm SA included; Oliver+S uses 1/2 in SA trimmed to 1/4-1/8 in after sewing.",
+    "source": "https://peekaboopatternshop.com/our-blog/how-to-sew-a-bucket-hat ; https://hellosewing.com/diy-bucket-hat-pattern/ ; https://www.applegreencottage.com/tutorial-cute-bucket-hat/ ; https://oliverands.com/community/blog/2016/08/reversible-bucket-hat-tutorial.html ; https://sewing.patternreview.com/Patterns/110511",
+    "confidence": "high"
+   },
+   {
+    "topic": "Turning opening and closing method (industrial vs hand)",
+    "detail": "Two documented methods. (A) Bag-out at brim: shells placed RS together, sew the brim outer edge at 1 cm leaving a 5-8 cm gap (blogs specify 1-2 in, 2 in, 3 in), trim/grade SA to ~5 mm, notch, turn through gap, press edge, then the brim topstitch closes the gap by catching the folded SA - no hand work; this is the machine method used by Peekaboo, Spoonflower, Hello Sewing, AppleGreen. (B) Oliver+S: join the two brims first, attach brim to shell A, then fold shell B's lower SA under and blind-stitch it by hand over the seam - not suitable for production. Recommendation for factory: method A with the gap centred at CB of the brim edge (6-8 cm), closed by the single 6 mm topstitch row; add an optional stitch-in-ditch or 2 mm edge-stitch along the brim/band seam to stop the two shells rotating relative to each other.",
+    "source": "https://peekaboopatternshop.com/our-blog/how-to-sew-a-bucket-hat ; https://hellosewing.com/diy-bucket-hat-pattern/ ; https://sweetredpoppy.com/free-reversible-bucket-hat-sewing-pattern/ ; https://oliverands.com/community/blog/2016/08/reversible-bucket-hat-tutorial.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "Head circumference size chart (adult S/M/L)",
+    "detail": "Industry charts converge on S 54-56 cm, M 56-58 cm, L 58-60 cm, XL 60-62 cm (bon-clic-bon-genre/Lock Hatters); mfgmerch: S 53.3-55.2, M 55.2-57.8, L 57.8-59.7; Sumkcaps bucket-hat chart: S 54-55, M 56-57, L 58-59, XL 60-61. Average adult female = 57 cm, male = 59 cm. Metric grade between sizes is 1 cm for fitted hats, 2 cm for S/M/L alpha sizing. Ease: add 1-1.5 cm to head measurement for the finished inside circumference (1 cm for 7 oz twill, 1.5 cm for rigid denim - Happyoff). Merchant & Mills finished circumferences M 57.5 / L 59.5 / XL 61.5 cm confirm ~+1.5 cm ease and 2 cm grade. Recommended spec for test case: S fits 55-56 -> finished 57.0; M 57-58 -> 59.0; L 59-60 -> 61.0 cm.",
+    "source": "https://www.bon-clic-bon-genre.us/content-how-to-determine-your-hat-size_0.htm ; https://mfgmerch.com/hat-size-chart/ ; https://sumkcaps.com/bucket-hats-size-guide/ ; https://happyoff.com/blogs/news/bucket-hat-sizing-technical-guide ; https://sewing.patternreview.com/Patterns/110511",
+    "confidence": "high"
+   },
+   {
+    "topic": "Crown height, top diameter, brim width by size and grade increments",
+    "detail": "Sumkcaps (manufacturer): crown (top) diameter S 16.5-17 / M 17.5-18 / L 18.5-19 / XL 19.5-20 cm; crown depth S 8.5-9 / M 9-9.5 / L 9.5-10 cm; brim S 5-5.5 / M 5.5-6 / L 6-6.5 / XL 6.5-7 cm. Solbari: brim 6.5 cm (S/M) and 7 cm (L/XL), crown depth at side 8.5 / 9 cm. MeasuringKnowHow: brim 5-7.6 cm, crown 5-10 cm typical. Nury: 9 cm crown, 7 cm brim, ~29 cm overall silhouette. Geometry: top-circle diameter = top circumference / pi; a 2 cm circumference grade = 0.64 cm diameter grade. Recommended spec (finished, cm): top diameter S 17.4 / M 18.0 / L 18.6 (grade 0.6); crown height at side S 8.5 / M 9.0 / L 9.5 (grade 0.5); brim width 6.5 all sizes (or 6.5/6.5/7.0); brim outer circumference = inside circ + 2*pi*6.5 = ~97.8 / 99.8 / 101.8; overall brim-edge diameter ~31.1 / 31.8 / 32.4; hat total height ~15.5-16.5.",
+    "source": "https://sumkcaps.com/bucket-hats-size-guide/ ; https://www.solbari.com/pages/go-to-bucket-hat-men-size-guide ; https://www.measuringknowhow.com/bucket-hat-dimensions/ ; https://nury.love/hat-sizes",
+    "confidence": "medium"
+   },
+   {
+    "topic": "POM list with tolerances",
+    "detail": "Recommended POMs (measure flat, inside, at brim/band seam): A Inside circumference at brim seam +/-1.0 cm; B Crown height at side seam (brim seam to top seam) +/-0.5; C Top-circle diameter (seam to seam) +/-0.5; D Brim width (brim seam to edge, at 4 points: CF, CB, L, R) +/-0.3; E Brim outer circumference +/-1.5; F Total height (top to brim edge, hat standing) +/-0.5; G Topstitch distance from brim edge 6 mm +/-1 mm; H Side-seam alignment between shells <=5 mm offset; I Turning-gap closure position CB +/-2 cm. Basis: soft hats tolerate +/-0.5-1.0 cm circumference (Reference.com); no published bucket-hat tolerance table exists, so values are derived from hat-size grade (a 1.27 cm error = one fitted size) and general apparel practice.",
+    "source": "https://www.reference.com/business-finance/measuring-head-circumference-hat-dimensions-accurate-fit ; https://techpacker.com/blog/design/what-is-a-garment-spec-sheet/ ; industry knowledge",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Fabric specification - 280 gsm cotton twill",
+    "detail": "280 gsm = 8.26 oz/yd2 (1 oz/yd2 = 33.9 gsm; Fashion-Incubator chart). Standard mill construction for 270-280 gsm 100% cotton twill: 3/1 twill, yarn 20s x 16s Ne, density 128 x 60 (ends x picks per inch), width 57/58 in (147 cm) - available at 58/60 in; 240 gsm version is same construction lighter finish. 3/1 has longer floats and softer hand but is slightly less stable than 2/1; unsanforized cotton can shrink 5-10%, sanforized targets <1% residual, common buyer tolerance for dimensional change (AATCC 135, 3 washes) is <=3% warp/weft. Pattern blogs and Happyoff recommend 7-9 oz (240-300 gsm) twill/canvas for bucket hats; Merchant & Mills suggests mid-weight canvas/8-13 oz denim. Spec line: 100% cotton, 3/1 twill (Z), 20x16 / 128x60, 280 gsm +/-5%, 147-150 cm cuttable, reactive dyed, sanforized, residual shrinkage <=3% x <=3%, colourfastness to rubbing dry >=4 / wet >=3 (AATCC 8) - critical because black is in permanent contact with khaki (MUJI warns of dark-colour transfer on its twill bucket hat). Relax fabric 24 h before cutting; run a shrinkage test per colour lot.",
+    "source": "https://fashion-incubator.com/wp-content/uploads/2015/09/gsm_to_oz_yd_2.pdf ; https://junxiangtextile.en.made-in-china.com/product/LJYrcRlUmxWV/China-20-16-128-60-Cotton-3-1-Twill-Fabric-for-Workwer-Uniform.html ; https://purafabric.com/twill-cotton-fabric-a-practical-guide-to-weave-properties-and-applications/ ; https://en.wikipedia.org/wiki/Sanforization ; https://happyoff.com/blogs/news/ultimate-fabric-guide-professional-bucket-hats ; https://www.muji.us/products/cotton-twill-bucket-hat-dba75a5a",
+    "confidence": "high"
+   },
+   {
+    "topic": "Fabric consumption per hat",
+    "detail": "Home patterns quote 0.5 yd (45 cm) of outer + 0.5 yd lining at 36-45 in width, or 35 cm of 36 in fabric per shell (Hello Sewing); Merchant & Mills: 0.5 m self at 80 cm width (narrow brim) + 0.3 m lining. Computed for size M with 1 cm SA: top circle ~21.5x21.5 cm, 2 band panels ~32x11 cm, 2 brim halves ~35x17 cm -> ~0.23 m2 net per shell, 0.46 m2 net per hat. At 75-80% marker efficiency (multi-size marker on 150 cm) -> ~0.60 m2 gross = ~0.40 m of 150 cm fabric per hat total, i.e. ~0.20 m khaki + ~0.20 m black per hat (allow 0.22-0.25 m each incl. 5% cutting loss for first run). Net fabric weight ~130 g; finished hat ~135-150 g (listed product weights of 7-8 oz for twill bucket hats are shipping weights).",
+    "source": "https://hellosewing.com/diy-bucket-hat-pattern/ ; https://www.applegreencottage.com/tutorial-cute-bucket-hat/ ; https://sewing.patternreview.com/Patterns/110511 ; https://www.textileschool.com/209/fabric-consumption-in-garment-making/ ; computed",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Thread, needle, stitch type, SPI",
+    "detail": "Coats cap application guide: panel assembly 301 lockstitch, Coats Epic (poly core-spun) Tex 24 / Tkt 120 or Astra spun poly Tex 27 / Tkt 120; embroidery Sylko Tex 27. Coats work-caps guide (heavier twill): Epic Tex 40 / Tkt 80, needle Nm 80-90, 12-14 stitches per 3 cm (= 10-12 SPI). Tex-to-ticket: Tkt = 3000/Tex (Tex 27->Tkt 110/120, Tex 30->Tkt 100, Tex 40->Tkt 75/80, Tex 60->Tkt 50). Needle: DBx1 (1738/16x257) is the plain single-needle lockstitch system Nm 65-110; DPx5 (135x5) is for zigzag/bartack/pattern sewers/twin-needle and automatic brim stitchers, Nm 70-140; R (round/sharp) point for twill; Nm 100-110 suggested for denim/twill workwear, Nm 80-90 adequate for 2-4 plies of 280 gsm. Recommendation: seaming Tex 27-30 core-spun poly (Tkt 120/100), DBx1 Nm 80-90 R; brim topstitch Tex 40 core-spun (Tkt 75/80), Nm 90-100, 10-11 SPI (spec 10-12); optional bold look Tex 60 / Tkt 50 on Nm 100-110. Reversible colour rule: needle thread matches the face up (khaki), bobbin thread matches the other face (black) - balance tension so neither shows through; specify both thread colours in the BOM.",
+    "source": "https://www.coats.com/en/industries/fashion-accessories-travel-and-luggage/applications/caps/ ; https://www.coats.com/en/industries/apparel/applications/workwear-uniforms/work-caps/ ; https://onlineclothingstudy.com/difference-between-tex-and-tkt-in/ ; https://suprasewing.com/blogs/news/industrial-needle-systems-dbx1-dpx5-uy128-explained ; https://www.thethreadexchange.com/miva/merchant.mvc?Screen=CTGY&Category_Code=needle-size-chart",
+    "confidence": "high"
+   },
+   {
+    "topic": "Brim topstitching - rows and spacing",
+    "detail": "Pattern sources: Oliver+S concentric rows 1/4 in (6 mm) apart; Spoonflower every 3/8 in (10 mm); Hello Sewing every 1/2 in (12.5 mm), 5-6 rows; Peekaboo edge-stitch + ~4 rows using presser-foot width. Commercial caps run 4-8 parallel rows on a machine with a spacing guide; programmable bucket-hat brim stitchers (JYL) sew concentric rows automatically. Test case = single row at 6 mm from brim edge: sew with an edge guide/compensating foot, 10-11 SPI, start/stop at CB side seam with 1 cm overlap (no backtack visible), this row also closes the turning gap. Note in tech pack that a single row gives a soft brim; offer 3 rows at 6/12/18 mm as an upgrade option.",
+    "source": "https://oliverands.com/community/blog/2016/08/reversible-bucket-hat-tutorial.html ; https://www.spoonflower.com/en/learn/diy-reversible-bucket-hat-tutorial-free-pattern ; https://hellosewing.com/diy-bucket-hat-pattern/ ; https://sevenclay.com/page/blog/construction-of-a-cap ; https://www.jylsewing.com/hat-stitching-machine/bucket-hat-sewing-machine/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Brim interfacing for reversible at 280 gsm",
+    "detail": "Two 280 gsm plies give a 560 gsm brim; AppleGreen (double-layer construction) and many reversible patterns use no interfacing and rely on multiple stitch rows. Oliver+S and Peekaboo interface only ONE shell's brim (Fabric B) for a reversible hat; interfacing must be trimmed out of the SA and should be lighter than the shell fabric (Elbe Textiles). Happyoff: woven fusible cut at 45 deg to grain gives the brim spring; firm fusible for brims, medium woven for crowns. Available woven fusibles: 40-80 gsm (shirt-collar 60-70 gsm; 80 gsm heavy). Recommendation for test case with single topstitch row: 50-70 gsm woven fusible (polyester or cotton) on the black shell's brim only, cut on bias, trimmed 1 cm inside the cut edge; fuse per supplier datasheet (typ. 140-160 C, 2.5-4 bar, 12-18 s on a flat press), wash-test for bubbling. If brand wants a packable/soft hat, omit interfacing and state 'unstructured brim' in the tech pack.",
+    "source": "https://www.applegreencottage.com/tutorial-cute-bucket-hat/ ; https://oliverands.com/community/blog/2016/08/reversible-bucket-hat-tutorial.html ; https://peekaboopatternshop.com/our-blog/how-to-sew-a-bucket-hat ; https://happyoff.com/blogs/news/bucket-hat-interfacing-guide-stabilizer-tips ; https://elbetextiles.com.au/blogs/news/sewing-hats-sorrento-bucket-hat-and-serpentine-hat ; https://www.apexfashionlab.com/glossary/interfacing",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Sweatband, eyelets, and other non-reversible components",
+    "detail": "Non-reversible twill bucket hats carry a polyester inner sweatband (MUJI: body 100% cotton, inner band 100% polyester), 2 embroidered or metal eyelets per side (H&M, Patagonia) and multi-row brim stitching (OUYI, Unionwear). Reversible hats omit the sweatband (both faces are outer faces); eyelets are usually omitted because metal eyelets would have to pass through both shells and show a washer on one side. Options if ventilation is required: 2 embroidered eyelets (dia. ~8 mm) per side on each shell, done before assembly, in matching thread. Adjustable drawcord/hidden strap (MUJI) not applicable. Test case: no sweatband, no eyelets, no chin strap - state explicitly in tech pack so the factory does not add them.",
+    "source": "https://www.muji.us/products/cotton-twill-bucket-hat-dba75a5a ; https://www2.hm.com/en_us/productpage.0982706001.html ; https://www.cncaps.com/product/custom-bucket-hat-embroidered-reversible/ ; https://www.ouyihats.com/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Label placement on a reversible hat",
+    "detail": "Standard cap placement is the sweatband or crown lining (Super Label Store); neither exists on a reversible hat, and any label is visible when the other side is worn. Practical options used commercially: (1) small woven loop/flag label caught in the side seam of the designated 'inside' shell (black shell for colourway 1) ~2 cm above the brim seam - stitching is hidden in the seam; (2) folded woven label sewn flat at CB of the designated inner shell just above brim seam; (3) heat-transfer/printed care & content label inside the crown top of the designated inner shell (Uniqlo-style printed labels avoid a second sewn label). US FTC allows a temporary (hangtag) care label for fully reversible garments provided the label says 'Wash or dryclean, any normal method'; otherwise use a single loop label with brand on one face and fibre/care/size/origin on the reverse. Recommend: one woven loop label (brand + size) in left side seam of black shell + printed care/content on the back of that label or a heat-transfer inside black crown; hangtag carries reversibility story.",
+    "source": "https://superlabelstore.com/pages/hat-labels ; https://www.ftc.gov/business-guidance/resources/clothes-captioning-complying-care-labeling-rule ; https://www.uniqlo.com/us/en/products/E482816-000/00 ; industry knowledge",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Sewing sequence (operation breakdown with machine and estimated SAM)",
+    "detail": "Cutting: relax fabric 24 h, spread, cut (straight knife), fuse brim B on flat press, bundle by size/colour. Sewing (SNLS = single-needle lockstitch 301, DBx1): for EACH shell - 1) join band side seams x2, 1 cm (SNLS, 0.5 min) [insert woven label in left seam of black shell, +0.3]; 2) press seams open (iron, 0.3); 3) join brim halves x2 (SNLS, 0.5); 4) press brim seams open (0.2); 5) set top circle to band, 4 notches, ease band to circle (SNLS, 1.2); 6) set brim to band matching side seams (SNLS, 1.0) = ~3.7 min per shell, 7.4 for two. Assembly: 7) place shells RS together, sew brim outer edge 1 cm leaving 7 cm gap at CB (SNLS, 1.2); 8) trim/grade SA to 5 mm and notch (manual, 0.5); 9) turn, roll edge, press brim flat (iron, 1.0); 10) topstitch brim 1 row at 6 mm closing gap (SNLS with edge guide or programmable brim stitcher, 1.0); 11) optional stitch-in-ditch at brim/band seam (SNLS, 0.8); 12) thread trim + inspect (0.8); 13) final steam/press on form (0.7); 14) hangtag, fold, polybag (0.7). Estimated total sewing SAM ~11-13 min, ~15 min including finishing/packing. No published headwear SAM exists; figures are estimates built with the standard SAM method (observed time x rating x (1+allowance)) and should be validated on the first bundle.",
+    "source": "https://www.onlineclothingstudy.com/2011/02/how-to-calculate-sam-of-garment.html ; https://ordnur.com/apparel/standard-allowed-minutes-sam/ ; https://www.jylsewing.com/hat-stitching-machine/bucket-hat-sewing-machine/ ; construction sequence from pattern sources above",
+    "confidence": "low"
+   },
+   {
+    "topic": "Pressing and finishing",
+    "detail": "Press band and brim seams open before assembly (Oliver+S trims to 6 mm after pressing); after turning, roll the brim seam exactly to the edge (no 'lip' of the other colour showing) and press flat before topstitching; press interfacing per datasheet, using stamp method not sliding (Happyoff); final light steam on a crown form - do not crease crown. Check no shine/glazing on black twill (use press cloth).",
+    "source": "https://oliverands.com/community/blog/2016/08/reversible-bucket-hat-tutorial.html ; https://happyoff.com/blogs/news/bucket-hat-interfacing-guide-stabilizer-tips",
+    "confidence": "medium"
+   },
+   {
+    "topic": "QC checks, AQL and common defects",
+    "detail": "Hat inspection uses ISO 2859-1 sampling; typical: critical 0 / major AQL 2.5 / minor AQL 4.0. Critical: sharp metal, mould/odour, missing legal label. Major: wrong fabric/colour, deformed crown, wrong size, poor/wavy brim, noticeable stain, missing brand label. Minor: loose thread, slight label shift, packing wrinkle. Reversible-specific checks: circumference at brim seam within +/-1 cm; brim width at 4 points +/-0.3 cm; topstitch 6 mm +/-1 mm and parallel; SPI 10-12; side seams of the two shells aligned (<=5 mm); no bobbin colour showing on either face; turning gap fully closed and no needle holes; shade consistency within lot (khaki lots are prone to shade variation); crocking test black->khaki; brim lies flat (no wave/pucker from mismatched ease or over-stiff fusible); no fusible bubbling after wash test; crown not twisted; top-circle seam without pleats. Measurement per ctstek/CNCAPS: inspectors measure head circumference with calibrated tools against approved sample.",
+    "source": "https://jointopcap.com/de/custom-hat-quality-control-guide/ ; https://www.cncaps.com/how-to-inspect-custom-hats-intro/ ; https://ctstek.com/Cap-quality-check/4290.html ; https://www.qcadvisor.com/inspection-checklist/accessories-hats-scarves-belts-gloves-etc/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Packaging",
+    "detail": "Bucket hats are crushable and normally packed flat/folded: fold in half with brim folded to avoid creasing (buy4store) or flat-stacked; individual polybag with air hole and size sticker, 10-12 per inner bundle, 100-200 per export carton (5-ply, B+C flute); carton marks: style, colourway, size breakdown, qty, CoO; size/colour separation per carton and packing-list match (jointopcap, QC guides). Unstructured hats do not need crown protection blocks. For a first small run recommend flat pack, 1 pc/polybag, 50 pcs/carton.",
+    "source": "https://www.buy4store.com/blog/post/the-ultimate-guide-on-how-to-ship-hats-and-caps ; https://jointopcap.com/de/custom-hat-quality-control-guide/ ; https://www.onlineclothingstudy.com/2016/11/different-types-of-garment-packing.html",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Colourway definition for the test case",
+    "detail": "Colourway 1 'khaki outer / black reverse' and colourway 2 'black outer / khaki reverse' are physically the same garment (both shells present in every hat); they differ only in which side carries the brand label / is presented in packaging. Tech pack should either merge to one SKU with a 'default face' note or define the differentiator (label side, hangtag, thread colour). Suggested colour standards: Khaki PANTONE 16-0726 TCX (hex approx #C3B091, 'khaki'), Black PANTONE 19-0303 TCX Jet Black (#0A0A0A); thread: needle khaki-match, bobbin black-match (and vice versa for the black-face default); label ground to match black shell; lab-dip both colours on the 280 gsm twill.",
+    "source": "industry knowledge (Pantone TCX references); construction sources above",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Commercial reference points",
+    "detail": "Uniqlo Unisex Reversible Bucket Hat: garment-washed cotton, solid one side / check other; Patagonia Bucket Hat (non-reversible): organic cotton canvas, flat top, unstructured crown, side eyelets, stitched brim; MUJI cotton twill bucket hat: one size 56.5-59 cm, poly inner band, hidden adjuster; H&M cotton twill bucket hat: embroidered eyelets, sweatband; Merchant & Mills bucket hat pattern: sizes M/L/XL = 57.5/59.5/61.5 cm, narrow brim 4.8 cm, wide brim 11.4 cm, 1 cm SA. Automatic bucket-hat brim stitchers (JYL) exist for concentric-row brims; one operator can run several units.",
+    "source": "https://www.uniqlo.com/us/en/products/E482816-000/00 ; https://www.patagonia.com/product/bucket-hat/33595.html ; https://www.muji.us/products/cotton-twill-bucket-hat-dba75a5a ; https://www2.hm.com/en_us/productpage.0982706001.html ; https://sewing.patternreview.com/Patterns/110511 ; https://www.jylsewing.com/hat-stitching-machine/bucket-hat-sewing-machine/",
+    "confidence": "high"
+   }
+  ],
+  "recommendations": [
+   "Generator spec chart for the test case (finished cm, S/M/L): inside circumference at brim seam 57/59/61 (+/-1.0), crown height at side 8.5/9.0/9.5 (+/-0.5), top-circle diameter 17.4/18.0/18.6 (+/-0.5), brim width 6.5/6.5/6.5 (+/-0.3), brim outer circumference 97.8/99.8/101.8 (+/-1.5), total height 15.0/15.5/16.0 (+/-0.5), topstitch 0.6 from edge (+/-0.1). State 'fits head 55-56 / 57-58 / 59-60 cm' on the size label.",
+   "Construction block: two full 280 gsm twill shells (1 top, 2 band, 2 brim halves each), 1 cm SA, shells joined RS-together at brim outer edge leaving 6-8 cm gap at CB, SA graded to 5 mm and notched, turned, pressed, single 301 topstitch at 6 mm closing the gap; add stitch-in-ditch at brim/band seam as recommended default. No lining, no sweatband, no eyelets, no strap - say so explicitly.",
+   "BOM: 100% cotton 3/1 twill 20x16 128x60, 280 gsm, 147-150 cm, sanforized <=3%, khaki + black, ~0.22 m each per hat; woven fusible 50-70 gsm on black brim only (optional, bias-cut); thread Tex 27-30 core-spun poly for seaming (khaki + black), Tex 40 core-spun for topstitch (khaki needle / black bobbin); woven loop label; heat-transfer or printed care label; hangtag; polybag.",
+   "Sewing notes: 301 lockstitch, DBx1 Nm 80-90 R for seaming, Nm 90-100 for topstitch, 10-12 SPI; DPx5 only if the factory uses an automatic brim stitcher; balance tension so no bobbin colour shows on either face; match band and brim seams across both shells; ease band to top circle with 4 notches.",
+   "Quality: run shrinkage and crocking tests on each colour lot before cutting (black onto khaki is the main risk); use AQL 2.5 major / 4.0 minor with the reversible-specific checklist above; approve a size-M sealed sample of each face before bulk.",
+   "Flag the colourway issue to the client: 'khaki outer/black reverse' and 'black outer/khaki reverse' are the same hat; decide whether to ship one SKU or differentiate by label side/hangtag.",
+   "Mark SAM figures in the output as estimates (~11-13 sewing min, ~15 total) pending a first-bundle time study; there is no published headwear SAM."
+  ],
+  "open_questions": [
+   "Is the brim intended to be soft/packable (no interfacing, single topstitch) or structured (add fusible on one brim and/or 3 rows at 6/12/18 mm)?",
+   "Are the two colourways meant to be one SKU (same physical hat) or two SKUs differentiated by brand-label side / hangtag / thread colour?",
+   "Which face carries the woven brand label and care/content label, and does the brand accept a printed/heat-transfer care label inside one crown (visible when reversed)?",
+   "Egyptian labelling requirements (Arabic care/content label, country of origin) for a domestic first run - and is export (EU/US care-label rules) planned?",
+   "Band construction preference: 2 side seams (aligns with 2-piece brim) or single CB seam?",
+   "Confirm size label convention: S/M/L alpha only, or also print the cm range (55-56 / 57-58 / 59-60)?",
+   "Fabric sourcing: is the 280 gsm twill already sourced (mill spec sheet with shrinkage/colourfastness available), or should the tech pack specify a target construction (20x16 / 128x60) for local Egyptian mills?",
+   "Is ventilation required (embroidered eyelets on each shell) or acceptable to omit?",
+   "Target order quantity and size ratio (affects marker efficiency and the consumption figure)."
+  ]
+ },
+ "v2:ac341bce221c0fb55523bdf58df742944a371632b4dfb2a9cc12a741e427781a": {
+  "summary": "Factories consume a tech pack as a locked PDF (one section per page, sketch and its notes on the same page, numbered POMs tied to a diagram) plus an editable XLSX for the BOM and measurement chart; Excel-only packs drift between machines and are the format factories complain about. Egyptian/MENA makers (e.g. Kemora, Cairo, MOQ 50/colour; Thread Gate, MOQ 500) explicitly accept \"photo, sketch, sample or tech pack\", and Arabic-market tech-pack services deliver PDF/JPG/PNG with English section names transliterated or glossed in Arabic, so the winning format is English-primary with an Arabic gloss line per heading and per construction note, metric cm, Latin digits, LTR page. Of the export libraries, @react-pdf/renderer and raw PDFKit have no native BiDi (workarounds exist: U+200F markers, bidi-shaper), WeasyPrint is solid on Arabic via Pango/HarfBuzz but needs system libs, and headless Chromium (Playwright + @sparticuz/chromium or a container) gives correct Arabic shaping, @font-face embedding and the same HTML/SVG for web and PDF; exceljs (rightToLeft view, images, pageSetup) covers XLSX. For the sketch, a parametric inline-SVG template per product type (bucket hat: side, top, underside views with numbered POM leaders) is the only approach that guarantees symmetric, dimension-true, callout-anchored flats without CAD; AI vector models (Recraft V4 SVG) are fast but produce asymmetry and cannot be trusted to anchor POMs. Canonical bucket-hat numbers, thread/needle/SPI values, Pantone/hex for khaki and jet black, and a versioning/revision protocol are captured below.",
+  "findings": [
+   {
+    "topic": "Format factories actually want: PDF final + editable BOM/POM",
+    "detail": "Consistent guidance across tech-pack vendors and a factory-side write-up: send a locked PDF as the factory-ready handoff and an unprotected XLSX/CSV for BOM and POM so the factory can add comments; Excel-only packs fail because Excel does not anchor images to cells reliably and 'formatting drifts every time the file moves between machines'. Factory-side list of must-haves: black-and-white line drawings with leader lines to every structural detail (seam type, topstitch width, bartack placement); BOM rows with Pantone/hex, weight/spec, supplier code, per-unit consumption; a plus/minus tolerance column (typical \u00b10.3\u20131.0 cm); graded spec across every size; revision date + version + change notes on every file.",
+    "source": "https://dev.to/fouzia_shakil_0c559a7cb40/8-things-factories-actually-want-from-your-tech-pack-not-another-excel-file-4ogh ; https://techpacker.com/blog/design/techpacker-vs-excel/ ; https://apparel.wiki/blog/how-to-create-a-tech-pack-in-excel/ ; https://techpacker.com/blog/design/what-is-a-tech-pack/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Page order and 'sketch + notes on the same page' layout",
+    "detail": "Standard page sequence: cover (style name/number, season, colorways, version, date) \u2192 technical flats with callouts \u2192 how-to-measure page (flat with POM codes/arrows) \u2192 graded spec table with tolerances \u2192 BOM \u2192 construction notes \u2192 colorways \u2192 labels & packaging \u2192 revision log. When construction notes sit on a different page from the sketch, pattern makers 'read one document while holding another in mind' and seam allowances get defaulted; keep each detail's callout and its note in one visual block. Quantified stakes: unclear/missing measurement specs account for ~40% of first-sample rejections (Common Objective, cited by aitechpacks); White2Label's study across 400+ brands: 4.5 sample rounds/style without a structured pack vs 1.8 with one; each round 2\u20134 weeks and USD 100\u2013250 per sample.",
+    "source": "https://techpackwizard.com/an-inside-look-into-a-fashion-tech-pack/ ; https://www.onbrandplm.com/blog/tech-pack-template ; https://aitechpacks.com/blog/tech-packs-in-clothing-a-complete-guide ; https://techpacker.com/blog/design/digital-tech-pack-reduce-sampling-rounds/",
+    "confidence": "high"
+   },
+   {
+    "topic": "POM conventions: coded, diagram-linked, tolerance per row",
+    "detail": "Every POM gets a unique code (numbers or letters) that appears both on the how-to-measure sketch and in the spec table; table columns are POM code, description/how-to-measure, tolerance \u00b1, base-size value, graded values per size (grade increments). Default tolerance examples: \u00b10.5 cm (Onbrand); soft hats \u00b10.5\u20131.0 cm (headwear sizing guides). Metric cm is the working unit for MENA/EU factories; give one decimal place.",
+    "source": "https://www.pointsofmeasure.com/tutorials-education/diy-technical-design-section-5-points-of-measure ; https://www.onbrandplm.com/blog/tech-pack-template ; https://www.taas.nyc/blog/point-of-measure-for-apparel-clothing ; https://www.reference.com/business-finance/measuring-head-circumference-hat-dimensions-accurate-fit",
+    "confidence": "high"
+   },
+   {
+    "topic": "Revision workflow after sampling",
+    "detail": "Sample stages: proto (construction check) \u2192 fit sample (size/proportion) \u2192 PP/golden sample (approved reference). Revision log as first/last page with columns Version | Date | Summary of change | Reason (e.g. 'V1.1 2024-04-12 Adjusted sleeve width \u2013 first sample fit too tight'). Update the pack after each fitting round, not per idea; never overwrite old files; comments must be quantified ('move seam 1 cm forward'), and sample bags are labelled with the version they were cut from. Version semantics: v1, v2 for structural changes, v1.1/v1.2 for corrections; track status draft/under review/factory-approved.",
+    "source": "https://www.ninghowapparel.com/blog/updating-tech-packs-managing-revisions-during-sampling/ ; https://www.hunterharms.com/learn/apparel-sampling-process ; https://blog.waveplm.com/tech-pack-version-control/ ; https://apparel.wiki/blog/how-to-update-a-tech-pack-after-sampling-reviews/",
+    "confidence": "high"
+   },
+   {
+    "topic": "File naming convention",
+    "detail": "Pattern seen in practice: 'StyleCode_TechPack_v1.2.pdf' (Ninghow); generic best practice adds ISO date and status: YYYY-MM-DD_STYLECODE_techpack_v02_approved.pdf, two-digit version so v10 sorts after v09; the date should be the last approved edit, not creation date; align the same name across cover page, artwork files and size run. Proposed for the generator: MSD-<brand>-<style#>_<colorway>_TP_v02_2026-09-02.pdf and the matching .xlsx.",
+    "source": "https://www.ninghowapparel.com/blog/updating-tech-packs-managing-revisions-during-sampling/ ; https://aitechpacks.com/blog/fashion-tech-pack-template ; https://filently.com/blog/file-naming-conventions/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Egyptian/MENA factory intake reality",
+    "detail": "Cairo private-label maker Kemora: 'Send a reference photo, sketch, sample or tech pack\u2026 a photo, a sketch or an existing garment is enough to start', MOQ from 50 pcs/colour, bilingual EN/AR site, they draft the production brief themselves. Thread Gate (Egypt): MOQ from 500 pcs, offers 'tech pack review' before sampling. Egyptian sourcing agents (New Trend) and KTG's Cairo development centre operate in English with buyers. Arabic-language tech-pack freelancers (Khamsat) deliver PDF/JPG/PNG only and describe contents as \u0631\u0633\u0648\u0645\u0627\u062a \u0623\u0645\u0627\u0645\u064a\u0629 \u0648\u062e\u0644\u0641\u064a\u0629 (front/back drawings), \u062c\u062f\u0648\u0644 \u0645\u0642\u0627\u0633\u0627\u062a \u0645\u0641\u0635\u0644 (detailed size chart), \u062a\u062d\u062f\u064a\u062f \u0646\u0648\u0639 \u0627\u0644\u0642\u0645\u0627\u0634 \u0648\u0627\u0644\u062e\u0627\u0645\u0627\u062a (fabric/materials), \u0623\u0645\u0627\u0643\u0646 \u0627\u0644\u0637\u0628\u0627\u0639\u0629 \u0623\u0648 \u0627\u0644\u062a\u0637\u0631\u064a\u0632 (print/embroidery placement), \u0645\u0644\u0627\u062d\u0638\u0627\u062a \u062a\u0646\u0641\u064a\u0630 (execution notes); Arab manufacturing vocabulary mixes MSA with English loanwords used on the floor (e.g. '\u062a\u0643 \u0628\u0627\u0643', '\u0628\u0627\u062a\u0631\u0648\u0646', '\u0623\u0648\u0641\u0631\u0644\u0648\u0643'). Better Work Egypt covers ~60 factories; QIZ programme lists 1,293 companies. No public source documents Egyptian CMT workshops' file-format preferences directly.",
+    "source": "https://www.kemoratex.com/ ; https://threadgate.co/sourcing-process/ ; https://newtrendegypt.com/ ; https://khamsat.com/designing/fashion-design/3949775 ; https://arabictranslation.co.uk/arabic-manufacturing-translation ; https://betterwork.org/egypt/participating-factories-in-egypt/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Bucket hat POMs and reference values",
+    "detail": "Headwear spec trio: head circumference (at sweatband seam, brow line), crown height/depth at side (brim seam to tip seam), brim width (crown base to outer edge). Reference retail spec (Solbari): S/M head 55\u201358 cm, brim 6.5 cm, crown depth 8.5 cm; L/XL head 58.5\u201360.5 cm, brim 7 cm, crown depth 9 cm. OEM factory (Yukaihe) size chart: S 55\u201356, M 57\u201358, L 59\u201360, XL 61\u201362 cm; brim options 5/6/7/8/10 cm (7 cm 'classic'); crown depth range 9\u201313 cm; MOQ 50/colour; sample 7\u201310 days; bulk 15\u201325 days. Merchant & Mills pattern (mid-weight cotton drill/canvas): head circ M 57.5 / L 59.5 / XL 61.5, narrow brim 4.8 cm, wide brim 11.4 cm, 1 cm seam allowance, ease-stitch at 0.9 cm. Fit ease: add 1\u20131.5 cm over head measurement. Proposed S/M/L for the prototype: 56 / 58 / 60 cm internal circumference, crown side height 9.0 cm, brim 6.5 cm, tip oval ~18.5 \u00d7 16.5 cm at M (grade \u00b10.6 cm long axis), tolerance \u00b10.5 cm circumference, \u00b10.3 cm brim/crown.",
+    "source": "https://www.solbari.com/pages/go-to-bucket-hat-men-size-guide ; https://www.yukaihe.com/bucket-hat-sizing-fit-guide ; https://merchantandmills.com/images/Bucket%20Hat%20Pattern%20and%20Instructions(1).pdf ; https://happyoff.com/blogs/news/bucket-hat-sizing-technical-guide ; https://lairdlondon.co.uk/blogs/journal/how-to-choose-brim-width-and-crown-height-for-your-head-and-build",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Reversible bucket hat construction sequence",
+    "detail": "Pieces per shell: crown top (tip) \u00d71, crown side \u00d72 (or 1 on fold), brim \u00d72 (or 4 halves); reversible = two complete shells (khaki, black). Sequence (Merchant & Mills, adapted for reversible): 1) join crown side seams, press open, topstitch 6 mm each side (outer); 2) ease-stitch top of side at 0.9 cm, clip; 3) attach tip, press SA down, edgestitch 2 mm below seam; 4) join brim halves at side seams, press open; 5) for reversible: assemble shell A and shell B separately, then stitch brim A to brim B RS together around outer edge at 1 cm, trim/grade, turn; 6) topstitch brim from outer edge \u2014 hobby patterns use 5\u20136 concentric rows at 1.25 cm spacing; the client brief is a single row, so spec 1 row at 6 mm from finished edge and add a hidden understitch or 2nd row at brim/crown seam if brim flops; 7) attach crown to brim by bagging the two crowns at the brim seam, leave 10 cm gap, turn, close gap by edgestitching the brim/crown seam all round (this stitch is visible on both sides \u2014 call it out). Optional fusible interfacing on one brim layer; DTM thread per side (khaki bobbin/black needle when joining the two shells, or spec a neutral grey).",
+    "source": "https://merchantandmills.com/images/Bucket%20Hat%20Pattern%20and%20Instructions(1).pdf ; https://hellosewing.com/diy-bucket-hat-pattern/ ; https://oliverands.com/community/blog/2016/08/reversible-bucket-hat-tutorial.html",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Thread, needle, SPI for 280 gsm cotton twill",
+    "detail": "Tex-to-needle mapping: Tex 27\u201335 \u2192 Nm 70\u201380 (Singer 10\u201312); Tex 40\u201350 \u2192 Nm 80\u201390 (12\u201314); Tex 60\u201370 \u2192 Nm 90\u2013100 (14\u201316). A&E SPI bulletin: twill pants/shorts 8\u201310 SPI (more SPI reduces seam grinning); casual shirts 10\u201314; jeans 7\u20138. Recommendation for the spec: seams Tex 40 (100% spun polyester or core-spun) DTM, Nm 90/14 R-point needle, 301 lockstitch 10 SPI (\u22482.5 mm); brim topstitch Tex 40 (or Tex 60 for contrast look) at 8\u20139 SPI (\u22483 mm), 6 mm from edge; 1.0 cm seam allowance throughout.",
+    "source": "https://www.bsewinn.com/blogs/inspiration/sewing-thread-sizes-chart ; https://www.amefird.com/wp-content/uploads/2010/01/Selecting-the-right-SPI-2-5-10.pdf ; https://textilelearner.net/stitches-per-inch-spi-measurement/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Labels for headwear",
+    "detail": "Bucket hats use the same placement as caps: brand/crown label at centre-back inside crown, sweatband/size label facing forehead; care+fibre+origin on a centre-fold label at inside side seam. Typical woven crown label \u2248 2 \u00d7 4.5 cm; folded label 15 \u00d7 40 mm folding to 15 \u00d7 20 mm; heat- or laser-cut edges. For a reversible hat only one 'inside' exists at a time, so spec a single folded label caught in the crown/brim seam at CB (visible on both sides) or a printed heat-transfer on the tip lining of each shell.",
+    "source": "https://superlabelstore.com/pages/hat-labels ; https://labeloom.com/products/custom-labels-hats-caps ; https://keystonehats.com/custom-hat-labels/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Colour standards for the canonical colorways",
+    "detail": "Khaki: PANTONE 16-0726 TCX Khaki, hex #A39264, RGB 163/146/100 (Yellow family, Cotton TCX library). Black: PANTONE 19-0303 TCX Jet Black, hex #2D2C2F, RGB 45/44/47. Colorway A: shell 1 = 16-0726 TCX, shell 2 = 19-0303 TCX; Colorway B is the same BOM with shell roles swapped (which colour is 'outer' in the product photo/packaging). Specify DTM thread per shell and that lab dips are approved against the TCX cotton swatch.",
+    "source": "https://www.pantone.com/color-finder/16-0726-tcx ; https://www.color-name.com/khaki-pantone.color ; https://www.pantone.com/na/en-us/color-finder/19-0303-tcx ; https://www.color-name.com/jet-black-pantone.color",
+    "confidence": "high"
+   },
+   {
+    "topic": "@react-pdf/renderer and Arabic",
+    "detail": "No native RTL mode; issues #1571 (2021, still the reference thread), #2638 (Arabic broke in 3.3.8 after bidi PR #2600, 'undefined glyph' errors), #3007 (Dec 2024). Working recipe: Font.register Noto Sans Arabic regular+bold, wrap Arabic runs in U+200F\u2026U+200E, use flexDirection:'row-reverse' and textAlign:'right', force numbers/URLs LTR; costs ~40 extra lines per template and mixed-direction table cells remain fragile. Community wrapper packages exist but require wrapping every <Text>. Verdict: usable for English-only PDFs; not recommended as the bilingual renderer.",
+    "source": "https://github.com/diegomura/react-pdf/issues/1571 ; https://github.com/diegomura/react-pdf/issues/2638 ; https://github.com/diegomura/react-pdf/issues/3007 ; https://dev.to/pavelbuild/generating-pdfs-in-7-languages-including-rtl-arabic-with-react-pdfrenderer-5p7",
+    "confidence": "high"
+   },
+   {
+    "topic": "PDFKit and Arabic",
+    "detail": "PDFKit's fontkit performs Arabic contextual shaping but no BiDi (issue #219 open since 2014). bidi-shaper (npm, MIT, ~15 kB min+gzip, zero deps) supplies UAX#9 reordering + Arabic shaping with a PDFKit adapter: import { textBidi } from 'bidi-shaper/pdfkit'; textBidi(doc, '\u0645\u0631\u062d\u0628\u0627', x, y, {align:'right'}); numbers stay LTR, lam-alef ligatures handled, no kashida. Still leaves you laying out tables by hand in PDFKit.",
+    "source": "https://github.com/cc1a2b/bidi-shaper ; https://github.com/foliojs/pdfkit/issues/219",
+    "confidence": "high"
+   },
+   {
+    "topic": "WeasyPrint (Python) and Arabic",
+    "detail": "Latest 69.0 (2026-06-02); requires Python \u22653.10 and Pango \u22651.44 plus HarfBuzz and Fontconfig; HarfBuzz font subsetting default since v63; RTL fixes landed in v55, v63 (rtl tables with collapsed borders), v65 (rtl justification), v65.1 (rtl list margins), v66 (rtl auto-width alignment); v69 adds CSS logical properties. Pango does BiDi/shaping natively so Arabic 'just works' with @font-face or system-installed Noto/Cairo; drawback is packaging native libs (Debian: libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0) into Lambda/containers, and no JS execution (SVG must be pre-rendered/inlined). Column-level RTL box layout historically weaker than Chromium.",
+    "source": "https://doc.courtbouillon.org/weasyprint/stable/changelog.html ; https://doc.courtbouillon.org/weasyprint/stable/first_steps.html ; https://github.com/Kozea/WeasyPrint/issues/574",
+    "confidence": "high"
+   },
+   {
+    "topic": "Playwright / headless Chromium print-to-PDF on AWS",
+    "detail": "page.pdf() (Chromium only) supports format A4, preferCSSPageSize, printBackground, margin, tagged (accessible), outline, headerTemplate/footerTemplate, scale 0.1\u20132. Must await document.fonts.ready (plus networkidle) or fallback fonts get baked in. Chromium embeds @font-face fonts automatically. @sparticuz/chromium: Brotli binary >50 MB, min 512 MB RAM (1600 MB recommended), works with playwright-core via chromium.args/executablePath(), ships Open Sans only, auto-loads fonts from /var/task/fonts, /var/task/.fonts, /opt/fonts (Lambda layer) or /tmp/fonts, Chromium v135 with arm64; container-image Lambda or ECS Fargate is the cleaner path once the 250 MB zip limit bites, Fargate for sustained throughput, Lambda for bursty. Lambda base images ship no fonts, so Noto Sans Arabic/Cairo must be bundled and referenced via @font-face (not fontconfig) to be deterministic.",
+    "source": "https://playwright.dev/docs/api/class-page#page-pdf ; https://raw.githubusercontent.com/Sparticuz/chromium/master/README.md ; https://snapapi.pics/blog/playwright-pdf-generation-2026.html ; https://medium.com/@phuongnb0706/html-to-pdf-in-docker-and-aws-2025-implementation-guide-8594a25f5557 ; https://github.com/alixaxel/chrome-aws-lambda",
+    "confidence": "high"
+   },
+   {
+    "topic": "XLSX libraries and RTL",
+    "detail": "exceljs: worksheet.views = [{rightToLeft:true}]; addImage (png/jpeg/gif) with editAs oneCell/absolute anchoring; pageSetup {fitToPage, orientation, printArea, paperSize A4}; data validation lists (good for factory comment dropdowns); works in Node and browser. SheetJS Community Edition: RTL only at workbook level via wb.Workbook.Views=[{RTL:true}], and cell styling/images are Pro-only, so exceljs is the better fit for a styled BOM/POM workbook. Python: openpyxl ws.sheet_view.rightToLeft = True.",
+    "source": "https://raw.githubusercontent.com/exceljs/exceljs/master/README.md ; https://docs.sheetjs.com/docs/csf/book/ ; https://github.com/SheetJS/sheetjs/issues/322 ; https://openpyxl.readthedocs.io/en/stable/api/openpyxl.worksheet.views.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "Arabic font choice for bilingual technical tables",
+    "detail": "All OFL-licensed on Google Fonts: Noto Sans Arabic (complete coverage, ligatures, recommended for PDF pipelines), Noto Naskh Arabic (traditional naskh, 'works everywhere'), Cairo (geometric, pairs with Inter; low contrast reads well at 8\u20139 pt in tables), IBM Plex Sans Arabic (matched Latin, designed for UI/tables). Arabic glyphs need ~1\u20132 pt more than the adjacent Latin size. Load as TTF/WOFF2 via @font-face with a local file path (not Google CSS) for server rendering.",
+    "source": "https://fonts.google.com/noto/specimen/Noto%2BSans%2BArabic ; https://fonts.google.com/specimen/Cairo ; https://fonts.google.com/specimen/IBM+Plex+Sans+Arabic ; https://codeguru.ae/blog/fonts-and-readability-best-arabic-script-for-the-web/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "AI-generated flats vs parametric SVG",
+    "detail": "Recraft V4/V4.1 Vector emits native SVG (paths, no tracing) via Replicate, fal.ai and Cloudflare Workers AI; Ropewalk's 2026-04-29 test of 12 flat-sketch briefs: 4\u20137 s per flat, most needed minimal cleanup, failures were asymmetric details (e.g. one pocket) fixed with an image-edit pass (Nano Banana Pro). Prompt keys: 'technical flat sketch, front and back view, clean closed outlines, no fill, consistent stroke weight, white background'. Weaknesses for a tech pack: no guaranteed symmetry, no dimensional truth, no stable anchor points to attach POM leaders, output varies per run. Programmatic SVG (Maker.js exports SVG/PDF/DXF in Node; or hand-written SVG with parameters) gives deterministic geometry and named anchor points for callouts. Dedicated vendors (aitechpacks flat-sketch generator, LOOK AI, StyleAI image-to-sketch) exist as fallbacks for photo-to-line-art.",
+    "source": "https://ropewalk.ai/blog/ai-fashion-design-clothing-generator-2026 ; https://replicate.com/recraft-ai/recraft-v4-pro-svg/api/api-reference ; https://developers.cloudflare.com/ai/models/recraft/recraftv4-vector/ ; https://maker.js.org/ ; https://aitechpacks.com/flatsketchgenerator",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Off-the-shelf headwear flat templates (what factories expect to see)",
+    "detail": "Commercial bucket-hat tech-pack templates ship six views: front, side, 3/4, back, top, and an under/inside view showing sweatband and seams, in AI/PDF/PNG. For a symmetrical reversible hat, three views suffice: side elevation, top plan (tip + brim rings), and underside/inside (label, seam allowances, the closing edgestitch).",
+    "source": "https://www.etsy.com/listing/4339352826/5-panel-bucket-hat-template-6-views-o ; https://www.templatemonster.com/product-mockups/trucker-hat-streetwear-vector-mockup-pack-361826.html",
+    "confidence": "medium"
+   }
+  ],
+  "recommendations": [
+   "Export stack: author the tech pack once as HTML+CSS (@page A4 landscape, one section per page with break-after, print CSS) and render PDF with Playwright + headless Chromium (playwright-core + @sparticuz/chromium in a container-image Lambda at \u22651600 MB, or an ECS Fargate service if throughput is steady); await document.fonts.ready and networkidle before page.pdf({format:'A4', preferCSSPageSize:true, printBackground:true, tagged:true, outline:true}). Same HTML powers the web preview, so the PDF and the web page cannot diverge.",
+   "Do not build the bilingual PDF on @react-pdf/renderer or raw PDFKit; if a pure-Node no-browser path is ever required, use PDFKit + bidi-shaper; if the team is Python, WeasyPrint \u226566 in a Debian container is the acceptable alternative (Pango handles BiDi), but drop inline JS/SVG interactivity.",
+   "XLSX: exceljs, one workbook per tech pack with sheets Cover, BOM, POM_Spec (graded S/M/L + tolerance + factory-comment column with data-validation dropdown 'OK / Adjust / Query'), Construction, Colorways, Revision_Log; set pageSetup {paperSize:9 (A4), orientation:'landscape', fitToPage:true}, embed the flat as PNG via addImage on the POM sheet, and offer a toggle that sets views=[{rightToLeft:true}] only for an Arabic-first factory (default LTR, since POM codes and cm values are Latin).",
+   "Bilingual scheme: English primary, Arabic gloss on the same line or directly beneath for every section heading, POM description, construction step and BOM item (e.g. 'Head circumference at sweatband seam / \u0645\u062d\u064a\u0637 \u0627\u0644\u0631\u0623\u0633 \u0639\u0646\u062f \u062e\u0637 \u0627\u0644\u062d\u0632\u0627\u0645'); page direction stays LTR, each Arabic span gets dir='rtl' lang='ar' and unicode-bidi:isolate; numbers, units (cm, gsm, Tex, SPI) and POM codes always Latin digits; fonts: Inter (Latin) + Noto Sans Arabic or Cairo (Arabic) at +1 pt, bundled as local TTF/WOFF2 via @font-face in the container image, never fetched from Google at render time.",
+   "Page structure for v1: 1 Cover (style#, name, brand, season, version, date, colorway thumbnails, contact); 2 Product description & intended use + reference photo; 3 Technical flats with construction callouts (same page as notes); 4 How-to-measure diagram with numbered POMs; 5 Graded spec table S/M/L with tolerance; 6 BOM; 7 Colorways (swatch, Pantone TCX, hex, DTM thread, which shell is 'outer'); 8 Labels & packaging; 9 Revision log + sample-comment table (Round, Sample type proto/fit/PP, Date, Comment, Action, POM affected).",
+   "Bucket hat POM set (codes reused as SVG anchor ids): A Internal head circumference at crown/brim seam (S 56 / M 58 / L 60 cm, \u00b10.5); B Crown side height, seam to seam at side seam (9.0 / 9.0 / 9.5 cm, \u00b10.3); C Brim width, crown seam to finished edge at CF (6.5 / 6.5 / 6.5, \u00b10.3); D Tip length, seam to seam (18.5 / 19.2 / 19.9, \u00b10.3); E Tip width (16.5 / 17.2 / 17.9, \u00b10.3); F Brim outer circumference (\u2248A + 2\u03c0\u00b7C: 96.8 / 98.8 / 100.8, \u00b11.0); G Brim topstitch distance from edge (0.6 cm, \u00b10.1); H Side-seam topstitch offset (0.6 cm); J Crown/brim seam edgestitch (0.2 cm, visible both faces); K Label position, CB inside, 1.5 cm below tip seam. Grade 2 cm on A, ~0.7 cm on D/E per size.",
+   "SVG strategy: build one parametric template module per product type (start: bucket hat) that takes the M-size POM values and emits three views as inline SVG: (1) side elevation \u2014 tip seam line, trapezoidal side band, brim as flared band with a single dashed topstitch line at 6 mm; (2) top plan \u2014 tip oval (D\u00d7E), crown ring, brim outer ring, side seams marked at 3/9 o'clock; (3) underside \u2014 brim, crown opening, CB label rectangle, closing edgestitch. Each POM is an <g id='pom-A'> with a leader line and a numbered circle badge; stroke 1.2 px black outlines, 0.6 px construction lines, dashes for topstitch; no fills; viewBox in mm so 1 unit = 1 mm and the same SVG drops into the HTML/PDF and rasterises to PNG for the XLSX via Playwright screenshot. Generate the diagram from data, not from the model's prose.",
+   "Use AI image generation only for the optional 'appearance' panel (photo-to-line-art of the uploaded product photo, or Recraft V4 SVG with the prompt 'technical flat sketch of a reversible bucket hat, side view, clean closed outlines, no fill, black lines on white, symmetrical'); run a symmetry check (mirror-and-diff on the raster) and fall back to the parametric flat if it fails; never attach POM leaders to an AI image.",
+   "Sketch-input handling: when the user uploads a photo, have the LLM extract structured attributes (crown height class, brim width class, panel count, topstitch rows, closure/adjuster) into the parametric template's parameters, and show the annotated photo next to the generated flat so the factory sees intent and spec side by side.",
+   "Versioning: expose file names as <BRAND>-<STYLE#>_<COLORWAY>_TP_v<NN>_<YYYY-MM-DD>.pdf/.xlsx, embed version + date in every page footer, keep immutable copies per version in S3, and implement 'Sample review' as a form that appends dated, quantified comments and bumps v1.x \u2192 v1.(x+1) (v2 only for construction changes); include the sample-type label (Proto / Fit / PP) to print on the sample bag.",
+   "Construction page for the canonical hat: 1 cm SA throughout; 301 lockstitch Tex 40 DTM, Nm 90/14, 10 SPI seams / 8\u20139 SPI topstitch; crown side seams pressed open and topstitched 6 mm both sides on each shell; tip attached with 0.9 cm ease stitch, SA toward side, edgestitched 2 mm; brims joined RS together, graded, turned, single row topstitch 6 mm from edge (per brief; note in comments that 3\u20135 concentric rows at 12 mm is the common alternative if the brim flops); crowns bagged to brim seam with 10 cm turning gap, closed with a 2 mm edgestitch that shows on both faces; DTM thread per shell with grey Tex 40 bobbin at the junction seam if the factory cannot switch.",
+   "Ask the factory for confirmation in the pack itself: a 'Factory acknowledgement' block (sample size, unit = cm, tolerance accepted, thread available, lead time) with an Arabic gloss, and a QR link back to the live web version so revisions are pulled, not emailed."
+  ],
+  "open_questions": [
+   "Which Egyptian workshops will run the first sample (in-house CMT, a Cairo private-label maker like Kemora, or a QIZ factory)? Their sample-room language mix (Arabic-only cutters/sewers vs English-reading merchandisers) decides whether the Arabic gloss must cover construction steps or only headings.",
+   "Does the marketplace need XLSX at all for v1, or is a PDF plus a web 'comment on this POM' flow enough? XLSX doubles the export surface.",
+   "Runtime constraint on AWS: is a container-image Lambda (>250 MB) or a Fargate service acceptable, or must rendering stay inside a zip-deployed Lambda? This decides Chromium vs PDFKit+bidi-shaper.",
+   "Node or Python for the render service? WeasyPrint is the strongest no-browser Arabic option but only in Python.",
+   "Should the canonical hat spec a single brim topstitch row exactly as briefed, or allow the generator to propose the 3\u20135 row alternative when the brim is unlined/uninterfaced?",
+   "Do you want the generator to emit both colorways as two tech packs (one style# each) or one style with two colorway lines (the reversible construction is identical, only the 'outer' designation flips)?",
+   "Which base size do you want as the sample size for grading (M / 58 cm is the industry default)?",
+   "Is there budget for Pantone TCX swatch references in the BOM, or should the colour standard be 'match to supplied lab dip / hex' for a first local run?"
+  ]
+ },
+ "v2:1d1c8597587986066e62714c083e02ce3701e60ddd6aa5ae32573bf73540a247": {
+  "summary": "The 2025-26 \"AI tech pack\" field splits into three tiers: (1) incumbent spec/PLM tools with no generative AI (Techpacker $35-125/user/mo, Sewport, Fashinza managed service, Audaces Idea with auto pre-costing), (2) 3D suites that auto-derive POM/BOM from a modeled garment but require 3D expertise (CLO-SET Excel tech pack at $50/mo; Browzwear Excel/HTML/DXF/CSV export, enterprise pricing), and (3) a crowded wave of photo/text-to-pack startups (The New Black $15-195/mo, aitechpacks.com $18/pack or $48/mo, Adstronaut $3-6/pack, Genpire ~40-50 credits/pack on $22.90-74.90/mo, The F* Word 115 credits/pack on $299/mo, Skema3D, Tchpack \"Aria\", Alibaba Accio/AI Mode). Every tier-3 tool produces \"plausible\" AI measurements with an explicit disclaimer that fit intent, tolerances and suppliers must be corrected by a human; independent reviewers put draft completeness at 50-70%, none validates against a factory, almost all export PDF only (Excel only on higher tiers), none supports Arabic, and several explicitly say accessories/hats need manual supplementation. Public hat prior art (Specter OS cap guide, FittDesign 6-panel bucket hat template, Ace Headgear/Purnaa manufacturer templates, Sumkcaps/Yukaihe/Solbari size charts) converges on a 5-10 page layout: cover, multi-view flat, POM table with target + tolerance (\u00b10.5 cm crown/brim, \u00b11 cm circumference), BOM with gsm/Pantone TCX/thread Tex, construction with SPI and brim row spacing, colorway matrix, labels/packaging. A prototype that computes (not guesses) the bucket-hat geometry from head circumference, states every assumption with a confidence flag, does consumption math per colour, emits PDF + XLSX + JSON and renders in Arabic and English will be differentiated from everything surveyed.",
+  "findings": [
+   {
+    "topic": "Techpacker (incl. Techpack Builder / PLMBR)",
+    "detail": "Card-based manual spec editor. Pricing $35/user/mo (Techpack Builder), $95 (PLM Professional), $125 (PLM Premium), annual billing; PDF export on all tiers, Excel export only on Professional/Premium. No generative AI: independent reviews state it 'does not generate flat sketches, you still need to create these in Illustrator and upload them' and 'AI features limited to suggestions rather than full generation'. Ecosystem split in 2025-26 into tpbuilder.ai (free local-first desktop editor, .tp editable / .tpv read-only factory format / PDF, cloud collab 'in development') and plmbr.ai ('AI-powered PLM', 10,000+ sketch library, pricing by demo only). No auto measurements/grading beyond stored grading rules.",
+    "source": "https://techpacker.com/pricing/ ; https://www.adstronaut.net/blog/best-tech-pack-software ; https://techpacker.com/blog/design/best-tech-pack-software-2026/ ; https://tpbuilder.ai/ ; https://plmbr.ai/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Fashinza",
+    "detail": "Managed-manufacturing marketplace (250+ factories, 200+ brands, India/US/UAE). Tech packs are produced by humans 'using platforms like Adobe Illustrator or Excel'; its AI is used for capacity booking and supply prediction, not spec generation. No public pricing or turnaround. Not a self-serve generator; it is a service competitor, not a software one.",
+    "source": "https://fashinza.com/fashion-designs/tech-packs/ ; https://www.businesswire.com/news/home/20220727005298/en/",
+    "confidence": "high"
+   },
+   {
+    "topic": "CALA (rebranded Mercer Design Studio)",
+    "detail": "Input: text prompt, reference image, hand sketch, CAD or existing tech pack. Text-to-image originally DALL-E (Oct 2022 PR), now Flux/Stable Diffusion, plus AI paintbrush and variation generation. Claimed pipeline: upload sketch -> extract silhouette -> align to the brand's pre-existing construction library -> tech pack with seam allowances, stitch types, fabric requirements, then routed to CALA's own vetted factories. Plans: Designer / Studio / Studio Pro / Enterprise (prices not public; 2019 listing showed $100-150/mo). ~40 brands incl. NBA teams, KidSuper. Weaknesses: depends on a brand construction library (a first-run Egyptian brand has none), closed factory network, opaque pricing, no evidence of graded POM tables or Excel export.",
+    "source": "https://www.prnewswire.com/news-releases/powered-by-dall-es-ai-system-cala-makes-it-possible-to-generate-apparel-accessory-shoe-and-lifestyle-product-designs-from-natural-language-descriptions-and-reference-images-301654308.html ; https://creati.ai/ai-tools/cala/ ; https://www.saasworthy.com/product/cala/pricing ; https://fashioninnovation.blog/blog/cala-is-now-mercer-supply-chain-startup-rebuilt",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Audaces Idea / Audaces360",
+    "detail": "2D technical-drawing + tech sheet tool with automatic preliminary costing ('automatic pre-cost') and integration to Audaces Pattern/Marker for real consumption. Sold only inside Audaces360 bundles (Creative plan = Isa + Idea + Fashion Studio + 100 monthly 'Sofia' AI credits; Pro/Enterprise add Pattern, Marker, Digiflash); pricing on request. Input is drawn by the designer, not derived from a photo. Strength worth copying: cost sheet and marker-based consumption are first-class. Weakness: no photo-to-spec, desktop, Portuguese/Spanish/English only.",
+    "source": "https://audaces.com/en/solutions/idea ; https://audaces.com/en/plans/companies",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Browzwear VStitcher / Stylezone",
+    "detail": "Tech pack is generated from the 3D garment: BOM with colorway variants, measurements and rulers as CSV, artwork placement, multi-colorway renders, DXF pattern pieces with seam allowances, 3D annotations. Output as one Excel file or HTML + folders; 2025.1.1 improved artwork/colour names on the Excel tech pack; per-size PDF piece layouts. Teams plan = 3 users / 100 styles/yr, limited AI credits; enterprise quotes estimated $10k-50k+/yr. Not AI-generated; requires 3D expertise; 'requires factory buy-in for digital spec acceptance' and a Tech Pack Editor for non-Browzwear collaborators.",
+    "source": "https://browzwear.com/blog/how-to-generate-tech-packs-with-browzwear ; https://help.browzwear.com/en/articles/13065178-release-notes-vstitcher-2025-1-1 ; https://browzwear.com/pricing-plans ; https://www.adstronaut.net/blog/best-tech-pack-software",
+    "confidence": "high"
+   },
+   {
+    "topic": "CLO 3D / CLO-SET",
+    "detail": "$50/mo or $450/yr individual. CLO-SET '3D Tech Pack' auto-generates Product Overview, BOM, POM, Graphics, Cutter's Must, Comments, Annotations from the 3D file; 2D POMs placed on patterns auto-create 3D POMs; once grading is applied measurements populate all sizes; Excel export of BOM/tech pack on the advanced plan. Weakness: only as good as the POM/BOM entered during 3D design ('not AI-generated'); very steep learning curve (3-6 months); community threads report measurement differences between 3D and exported tech pack and unit (mm vs inch) friction.",
+    "source": "https://style.clo-set.com/en/resources/article/4c680edb7dd0417fb49086d0e812a74a ; https://support.clo-set.com/hc/en-us/articles/45303161788057-3D-Tech-pack ; https://support.clo3d.com/hc/en-us/community/posts/13610162252825-Tech-pack-exporting-measurement-difference ; https://www.softwaresuggest.com/clo-3d-fashion",
+    "confidence": "high"
+   },
+   {
+    "topic": "Sewport",
+    "detail": "Marketplace (1,000+ manufacturers, escrow, quotes) plus a tech pack GUIDE and toolbox; explicitly no AI generator ('tools and services to help you create your own tech pack'; you are matched with human spec-writers). Its guide defines the 5-column POM convention worth reusing: POM | Tolerance (+/-) | Description (how measured) | Requested | Fit comments; and 6 sections: sketches/description, style board, fabric placement/construction, colours (Pantone), BOM by placement/supplier/fibre/colour no., seam-to-seam measurements. Pricing not public (one listing cites \u00a318.75 subscription).",
+    "source": "https://sewport.com/tech-pack ; https://www.spotsaas.com/product/sewport/pricing",
+    "confidence": "high"
+   },
+   {
+    "topic": "Fitly",
+    "detail": "No tech pack product named 'Fitly' exists as of Sept 2026: fitly.ai resolves to a parked Namecheap page / consumer size-finder; closest production-stage analogue is Fit Collective (London, \u00a33M pre-seed Nov 2025, AI sizing at the production stage), which does not generate tech packs. Treat 'Fitly' in the brief as a mis-remembered name; do not benchmark against it.",
+    "source": "https://fitly.ai/ ; https://tech.eu/2025/11/04/fit-collective-secured-ps3m-to-solve-fashions-230b-fit-problem/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "The New Black (thenewblack.ai)",
+    "detail": "Input: photo of finished design (+ optional text, size range). Output: customisable sections (description, measurement table across sizes, BOM with supplier/qty/price columns, construction notes, annotated flats, labels/finishing); 'auto generate sizes and grading'; separate 'image to flat sketch' AI feature; canvas annotation tools (measurement bars, arrows, garment icons for sewing/care/packaging); one-click PDF; sketches exportable as SVG. Pricing $15 (200 credits) / $35 (500) / $65 (1,000) / $195/mo (3,000); 3 free generation credits; no free plan. Own caveat: 'It does not know your intended fit, so a measurement it proposes is a plausible one rather than yours'; cannot determine supplier details or manufacturing tolerances. No Excel/JSON export documented, no Arabic.",
+    "source": "https://thenewblack.ai/clothing-fashion-techpack ; https://thenewblack.ai/ai-design-features/clothing-tech-pack ; https://thenewblack.ai/pricing",
+    "confidence": "high"
+   },
+   {
+    "topic": "aitechpacks.com ('AI Tech Pack Generator', with 'Tech Pack Mama' assistant)",
+    "detail": "Input: garment photo, sketch or flat; batch 2-10 designs; can OCR up to 4 size-chart photos into editable POM text; 'Lock POM Measurements' (Pro) stops AI overwriting user POMs; CM or inch; XS-XL. Output: flats, spec sheet, measurement tables, BOM, construction, placement callouts, colorways. Export: PDF; Excel on Pro+; 'Factory Share' web link; Illustrator plugin on Designer. Pricing: $18 single export, $48/mo Pro (unlimited PDF+Excel, manual review), $130/mo Designer (batch, Factory Share, AI plugin), Enterprise (API, SSO, SOC2); 1 free editable draft. Category examples are shirt/jacket/bodice/pant/skirt only; hats not mentioned. Disclaimer: 'Review measurements, materials, tolerances... before factory handoff'. Marketing claims '95% accuracy per user benchmarks' with no factory validation.",
+    "source": "https://aitechpacks.com/ ; https://aitechpacks.com/techpack ; https://aitechpacks.com/pricing ; https://www.style3d.ai/blog/what-are-the-best-free-ai-tech-pack-generators-for-fashion-designers/",
+    "confidence": "high"
+   },
+   {
+    "topic": "Adstronaut AI",
+    "detail": "Input: flat-lay photo, mannequin shot, mockup or clean sketch. Output in 5-15 min: AI vector flat with leader-line measurement callouts (editable SVG/PDF), BOM with supplier/pricing fields, graded tables 'with differential grade rules across 6 sizing systems' citing ASTM D5585/D5219 and stitch types per ASTM D6193, tolerances, Pantone colorways, category-specific fields (knitwear, footwear, leather). Export: print-ready PDF + editable vector flats. Pricing: 25 free credits (one watermarked pack), ~$3-6/pack, plans $29/mo (125 credits) to $149/mo. Techpacker's own 2026 review rates its output '50 to 70% complete; requires manual editing'; single-user only. Claims first-sample revision rounds fell from ~3 to <1 (self-reported).",
+    "source": "https://www.adstronaut.net/tech-pack-generator ; https://techpacker.com/blog/design/best-tech-pack-software-2026/ ; https://www.adstronaut.net/blog/how-to-create-a-tech-pack",
+    "confidence": "high"
+   },
+   {
+    "topic": "Genpire",
+    "detail": "Input: plain-language description and/or reference photo/sketch; chat refinements. Output: BOM, flats/technical drawings, measurement tables/size charts, construction specs, Pantone colorways, assembly notes, packaging/labeling, cost estimate. Explicitly supports 'apparel, footwear, accessories, bags, home goods, furniture' (so hats are in scope). Pricing $22.90/mo (2,000 credits) / $37.90 (4,500) / $74.90 (10,000); a fully specified product with two views + construction + tech pack costs ~40-50 credits (~$0.50-1.00). Export formats not stated; grading automation not stated; its own blog admits tools 'suggest standard tolerances' rather than derive them.",
+    "source": "https://www.genpire.com/ai-tech-pack-generator ; https://www.genpire.com/pricing ; https://blog.genpire.com/tech-pack-mistakes",
+    "confidence": "high"
+   },
+   {
+    "topic": "The F* Word (thefword.ai)",
+    "detail": "Input: sketch, image, moodboard or brief. Output in '8-10 minutes': BOM, POM, grading, tolerances, callouts, '19 production guides'; exports .glb/.png/.pdf (Excel also claimed on blog). Pricing: 75 free credits (non-commercial), $10 one-off for 120 credits, Pro $299/mo (3,600 credits), Enterprise from $6,999/mo; 'Trend to Tech Pack' = 115 credits, full product workflow 162. Claims training 'on thousands of proprietary garment records tied to real factory outputs' but states packs are 'editable drafts that your technical designers approve before handoff'. Marketing-heavy, no public sample pack, 403-blocks scrapers.",
+    "source": "https://thefword.ai/pricing ; https://thefword.ai/ai-tech-packs-intelligent",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Skema3D, Tchpack (Aria), PatternFast, Onbrand, Raspberry, NewArc, Fashable, Style3D (2025-26 wave)",
+    "detail": "Skema3D: text prompt -> 3D render + multi-page PDF tech pack with cover, flats, BOM, POM with tolerances 'calibrated to garment category', graded XS-XXL, colorways with hex codes, labels/packaging, costing; free to start; own curation admits 'accessory tech packs require manual supplementation'. Tchpack: 'Aria' AI assistant builds packs from sketches/reference photos, Illustrator plugin + manufacturer marketplace, pricing undisclosed. PatternFast (YC): AI patterns + graded patterns + tech packs, DXF compatible with Browzwear/CLO/Gerber, apparel categories only, pricing undisclosed. Onbrand AI Design $49/$99 per user/mo: prompt/sketch/photo -> visuals/flats, spec sheet generation feeds Onbrand PLM. Raspberry AI ($298/user), NewArc, Fashable, Refabric: visuals only; Onbrand's own review: 'AI outputs look good, but they are not structured product data'. Style3D AI: 3D/pattern/BOM automation, $35-99/mo, no photo-to-pack. HuHu.ai discontinued.",
+    "source": "https://www.skema3d.com/ai-tech-pack-generator ; https://www.skema3d.com/resources/curation/best-ai-tech-pack-generators ; https://tchpack.com/blog/tech-pack-software-guide-2025 ; https://www.ycombinator.com/launches/LrB-patternfast-ai-for-instantly-manufacturable-fashion ; https://www.onbrandplm.com/blog/ai-tech-pack-generator ; https://www.style3d.ai/blog/what-is-the-cost-of-style3d-ai-and-is-it-worth-the-investment/ ; https://huhu.ai/blog/ai-fashion-tech-pack-guide/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Refabric, Resleeve, Genera",
+    "detail": "Refabric: $160/mo (2,000 credits), $265 (3,000), $550 (6,000); 'Tech Pack Generation' listed on all plans but third-party reviews say the bulk-production tech pack with precise measurements is 'currently developing'; it is an image/trend tool. Resleeve: $9/$49/$99/mo credits for design renders and virtual photoshoots; no tech pack module. Genera (Genera.Space): 'Tech Pack Converter' runs the OPPOSITE direction (tech pack/flat -> photorealistic on-model images, ~5 images per SKU in 20 min); not a spec generator. None of the three should be benchmarked on measurements.",
+    "source": "https://app.refabric.com/pricing ; https://techlaugh.com/refabric/ ; https://www.futurepedia.io/tool/resleeve ; https://generaspace.ai/ ; https://fashionunited.com/press/fashion/genera-is-a-fashion-disruptor-revolutionizing-the-industrys-outdated-processes-with-innovative-ai-technology/2025022064602",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Alibaba Accio / AI Mode / Accio Work (the direct 'Egyptian Alibaba' comparator)",
+    "detail": "Accio (app since 2024, Accio Work launched 24 Mar 2026) is trained on '1 billion product listings and 50 million suppliers'; from a product concept it 'generates a tailored development plan, complete with market insights, regulatory guidelines and design specifications', 'production-ready tech packs that suppliers can use', drafts RFQs and pings up to 10 verified suppliers with 48 h quote SLA. aimode.alibaba.com lists 'product spec and tech-pack generation' and image search. Observed weaknesses: outputs are prose 'material and structural requirements', 'three-view diagrams', 'assembly diagrams' without graded POM tables, tolerances or consumption; no export format; no validation framework; optimised toward Alibaba supplier matching. Arabic UI exists for the app store listing but spec language support is undocumented.",
+    "source": "https://aimode.alibaba.com/ ; https://www.prnewswire.com/news-releases/alibaba-international-releases-the-worlds-first-ai-agent-for-global-trade-302530000.html ; https://technode.com/2026/03/24/alibaba-international-launches-accio-work-ai-agent-says-it-can-build-online-stores-in-30-minutes/ ; https://bizrescuepro.com/accio-2-0-turn-your-product-idea-into-market-research-tech-packs-and-suppliers/ ; https://www.digitalcommerce360.com/2026/07/24/alibaba-accio-work-agentic-ai-b2b-sourcing/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Cross-tool weaknesses (state of the art gaps)",
+    "detail": "(1) Every photo-to-pack tool disclaims fit: measurements are 'plausible' guesses, not derived from a stated body/head size. (2) None publishes a per-field confidence or assumptions list; corrections are silent edits. (3) PDF is the universal export; Excel is gated to $48-130/mo tiers (aitechpacks, Techpacker PLM, CLO-SET advanced); JSON/API only on enterprise tiers. (4) No consumption/marker math outside Audaces/3D suites. (5) Hats/accessories are second-class: Skema3D says manual supplementation needed, aitechpacks lists only body garments, Specter OS's cap guide explicitly excludes bucket hats. (6) Flats are AI raster or AI-traced SVG, not parametric drawings tied to the POM values. (7) No Arabic/RTL support anywhere; Egyptian tech-pack literacy is low (BrandLab Egypt claims >90% of emerging Egyptian brands have factory problems because they do not use tech packs). (8) Tolerances, SPI and thread Tex are frequently omitted, which factories cite as the top rejection cause.",
+    "source": "https://thenewblack.ai/clothing-fashion-techpack ; https://techpacker.com/blog/design/best-tech-pack-software-2026/ ; https://www.skema3d.com/resources/curation/best-ai-tech-pack-generators ; https://www.specter-os.com/blog/cap-tech-pack ; https://brandlabeg.com/products/professional-t-tech-pack-package ; https://blog.genpire.com/tech-pack-mistakes",
+    "confidence": "high"
+   },
+   {
+    "topic": "Public hat/cap tech pack example 1: Specter OS cap tech pack guide (2026)",
+    "detail": "Defines the headwear layout convention: 5-10 pages = cover (style, season, colourway, revision history), flats front/back/side/detail, BOM, POM, construction, decoration, colourways, labels/packaging. POM table with target + tolerance: head circumference ~56-58 cm \u00b11 cm; crown height 10-12 cm \u00b10.5; brim length 7-8 cm \u00b10.5; brim width side-to-side \u00b10.5; sweatband 35 mm \u00b12 mm; eyelet 6 mm \u00b10.5. BOM rows: 300 gsm brushed cotton twill shell; sweatband 35 mm taffeta; 6 mm metal eyelets; woven main label 30x40 mm CB interior; 'Thread: Tex 40 polyester, tonal, all seams'. Construction: 6 mm seam allowance, crown seam topstitch single needle 7-8 SPI at 2 mm; brim rows 6 (entry) to 10-12 (premium) at 3-4 mm spacing. Colourway table columns: colour name + Pantone TCX/TPG, shell, underbrim, sweatband, closure/hardware finish, thread. Embroidery placement 'bottom of design 20 mm from brim seam'.",
+    "source": "https://www.specter-os.com/blog/cap-tech-pack",
+    "confidence": "high"
+   },
+   {
+    "topic": "Public hat tech pack examples 2-4: FittDesign bucket hat template, Ace Headgear PDF, Purnaa manufacturer template",
+    "detail": "FittDesign 'Unisex 6 Panel Bucket Hat' tech pack template: $48, Adobe Illustrator + PSD, 8 views (front, front-L/R, back, back-L/R, side L/R), true-to-scale flat with measurement callouts, 2 pre-coloured examples, 3-step PDF tutorial. Ace Headgear (cap OEM) free 82 MB 'Tech Pack PDF' covering baseball caps, bucket hats and beanies with stitch specs and CAD files (direct link below; too large for in-browser fetch, download with curl). Purnaa (cap manufacturer) free cap tech pack template, 'Excel to PDF formatting', form-gated at purnaa.com/cap-tech-pack-template; its guide lists fields: fabric, embroidery placement (main/accent/side/back), visor print, eyelets, label locations & material, hangtag, polybag, closure, care, QC/testing requirements. Behance hosts 'BUCKET HAT TECH PACK WITH MEASUREMENT CHART' (66 appreciations). techpacktemplates.com sells cap/hat XLS+AI templates with ~180 selectable measurement points.",
+    "source": "https://www.fittdesign.com/products/bucket-hat ; https://www.aceheadgear.com/uploads/file/20260416/Tech_Pack_PDF.pdf ; https://www.purnaa.com/cap-tech-pack-template ; https://www.behance.net/search/projects/hat%20tech%20pack ; https://www.techpacktemplates.com/tech-pack-templates-caps-and-hats",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Bucket hat size/grade reference data (S/M/L)",
+    "detail": "Three manufacturer charts agree on ~2 cm circumference grade: Sumkcaps S 54-55 / M 56-57 / L 58-59 / XL 60-61 cm with crown-top diameter 16.5-17 / 17.5-18 / 18.5-19 cm, crown depth 8.5-9 / 9-9.5 / 9.5-10 cm, brim 5-5.5 / 5.5-6 / 6-6.5 cm. Yukaihe (OEM): S 55-56, M 57-58, L 59-60; crown depth shallow 9-10 cm, standard 11-12 cm; brim 5 cm streetwear / 7 cm classic / 10 cm sun; sidewall 3-5 cm; 'round up to nearest 0.5 cm'; MOQ 50 pcs/colour; one-size 56-58 + drawstring adds $0.30. Solbari: S/M 56-58.5 cm brim 6 cm crown 9.5; L/XL 59-60.5 brim 7 cm. Everybody.World S 57.8 / M 60.6 / L 64.1 cm (oversized fit). Wearing ease 1-1.5 cm over head measurement (1 cm for light twill, 1.5 cm for rigid 14 oz). Tolerances: \u00b10.5 cm crown height/brim, \u00b11 cm circumference (Specter); \u00b10.5 cm finished circumference for fitted, steaming shifts opening 2-4 mm (Crownsforge). Head measured 1 cm above eyebrows/ears. Recommended prototype spec: S 55 / M 57 / L 59 cm finished inner circumference (+1 cm ease over head), crown top dia = C/\u03c0 (17.5 / 18.1 / 18.8 cm), side height 9.5 cm all sizes, brim 6.5 cm all sizes.",
+    "source": "https://sumkcaps.com/bucket-hats-size-guide/ ; https://www.yukaihe.com/bucket-hat-sizing-fit-guide ; https://www.solbari.com/pages/technical-bucket-hat-size-guide ; https://everybody.world/pages/bucket-hat-dimensions ; https://happyoff.com/blogs/news/bucket-hat-sizing-technical-guide ; https://www.specter-os.com/blog/cap-tech-pack ; https://crownsforge.com/blog/hat-sizing-fit-international-markets-2026-update.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "Colorway, fabric and thread constants for the test case",
+    "detail": "Khaki: Pantone 16-0726 TCX Khaki = #A39264, RGB 163/146/100. Black: Pantone 19-0303 TCX Jet Black = #2D2C2F (or 19-4007 TCX Anthracite #28282D if a softer black is wanted). Fabric: 100% cotton twill 3/1, 280 gsm \u00b15%, width 57/58 in (147 cm usable), pre-shrunk/mercerised, shrinkage \u22643% is the common workwear spec; typical construction quoted by mills is 20x16 yarn / 108x56 density. Thread: Tex 40 spun polyester (~Tkt 80) tonal for seaming and single-row brim topstitch is the cap-industry default; heavier Tex 60 only if a contrast decorative brim stitch is wanted; needle 90/14 (100/16 for Tex 60) on medium twill; stitch type ASTM D6193 301 lockstitch; 7-8 SPI on cap seams, 8-10 SPI generic. OEM comparison: blank 6-panel cotton bucket hat with 6 brim rows and 6 eyelets wholesales $5.5-8.5, MOQ 50.",
+    "source": "https://www.colorxs.com/color/pantone-16-0726-tcx-khaki ; https://www.colorxs.com/color/pantone-19-0303-tcx-jet-black ; https://www.colorxs.com/color/pantone-19-4007-tcx-anthracite ; https://www.spirittextile.com/product/33.html ; https://cbxy2020.en.made-in-china.com/product/odexitlAYHVr/ ; https://www.specter-os.com/blog/cap-tech-pack ; https://blog.wawak.com/post/choosing-a-top-stitch-thread ; https://www.hx-caps.com/blank-bucket-hats/custom-6-panel-bucket-hat.html",
+    "confidence": "high"
+   },
+   {
+    "topic": "Reversible bucket hat construction sequence (industrialised from published patterns)",
+    "detail": "Pieces per shell (x2 colours): crown top circle x1, side band x2 (or x1), brim x2 halves (or x1 ring); 1 cm SA (DIY sources use 6-13 mm). Sequence: (1) optional 60-80 gsm fusible on ONE brim only if stiffer brim wanted (280 gsm twill is self-supporting, reversible hats usually skip it); (2) join side-band CB seam, press open, topstitch 2 mm both sides; (3) notch crown top and band at quarters, ease and join crown to band, topstitch band 2 mm below seam; (4) repeat for second colour; (5) join brim short seams for each colour, place khaki brim on black brim RST, stitch outer edge, turn, press, edge-stitch 2 mm, then the ONE specified topstitch row (test case) at 8 mm from edge (vs 6-12 rows at 3-4 mm on standard caps); (6) baste brim inner edge to shell A head opening; (7) place shell B over RST, stitch head opening 1 cm leaving 6-8 cm gap, bag out, press, close by 2 mm topstitch all round the brim/crown seam through all layers (this row also locks the two shells and doubles as the second-side finish); (8) optional 2 x 6 mm eyelets per side; (9) woven main label + care label caught in CB band seam of the black side only, or a loop label at brim seam so both sides read. QC: circumference on head form \u00b11 cm, crown/brim \u00b10.5 cm, brim row straightness, no skipped stitches, metal detection.",
+    "source": "https://peekaboopatternshop.com/our-blog/how-to-sew-a-bucket-hat/ ; https://www.spoonflower.com/en/learn/diy-reversible-bucket-hat-tutorial-free-pattern ; https://www.specter-os.com/blog/cap-tech-pack ; https://tangrencap.com/quality-control-hat-manufacturing/ ; industry knowledge (industrial sequencing)",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Consumption math worked example (size M, computed, to be shown in the prototype with assumptions)",
+    "detail": "Inner circumference 59 cm (58 head + 1 ease). Net pattern areas with 1 cm SA: crown top circle \u00d820.8 cm = 340 cm\u00b2; side band 63 x 11.5 cm = 725 cm\u00b2; brim annulus r_in 8.4 / r_out 16.9 cm = 676 cm\u00b2; total 1,741 cm\u00b2 per colour shell. At 75% marker efficiency (small curved pieces) = 2,321 cm\u00b2 = 0.232 m\u00b2 per colour per hat; on 147 cm usable width = 0.158 m per colour per hat. Because both colorways use one khaki shell + one black shell, consumption is symmetric: per hat 0.158 m khaki + 0.158 m black; per 100 hats \u2248 15.8 m each, +4% shrinkage/cut waste \u2248 16.5 m each. Weight: 280 g/m\u00b2 x 0.232 m\u00b2 = 65 g fabric issued per colour, ~49 g net in the hat, finished hat \u2248 100 g + thread/label. Size S/L change area by ~(55/59)\u00b2 and (63/59)\u00b2 \u2248 -13% / +14%. DIY references (0.5 yd outer + 0.5 yd lining per adult hat) confirm the order of magnitude but are 3x looser than a marker.",
+    "source": "industry knowledge (geometry computed from the size chart above); https://garmentcalc.com/fabric-consumption-methods/ ; https://blisstulle.com/how-much-fabric-do-i-need-to-make-a-bucket-hat/ ; https://sumkcaps.com/bucket-hats-size-guide/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "masdrmena.com context",
+    "detail": "MASDR is a B2B sourcing marketplace for verified Egyptian (plus Moroccan/Gulf) factories with built-in Arabic-English translation, category browse, chat-and-request-quote flow, listed MOQs and prices, and claims 300,000+ founders/brand owners. It has no spec-sheet or tech-pack tooling today; the RFQ is free-text chat. A tech pack generator that outputs a bilingual, factory-readable document directly into that RFQ flow is a natural wedge and is absent from every competitor including Alibaba's Accio (English-first).",
+    "source": "https://masdrmena.com/",
+    "confidence": "medium"
+   },
+   {
+    "topic": "Tech-pack industry conventions to mirror (generic)",
+    "detail": "AAFA-style tolerances +/-0.25 in width, +/-0.5 in length (metric: \u00b10.5 / \u00b11 cm); POM rows lettered A-Z and drawn on the flat with leader lines; BOM columns: item, placement, composition, weight gsm, supplier, colour (Pantone TCX), qty per unit, unit price; construction table: operation, stitch type (ASTM D6193 code), SPI, SA, thread, machine; page budget 6-20 pages (cover 1, flats 1-2, BOM 2-4, POM 1, graded chart 1-2, construction 2-3, trims/labels 1-2, packaging 1); polybag example '4-mil clear, 20x24 in'; sample turnaround 4-8 weeks per revision, so every avoided revision is worth weeks.",
+    "source": "https://www.adstronaut.net/blog/how-to-create-a-tech-pack ; http://www.techpacks.co/blog/free-sample-tech-pack-pdf ; https://blog.genpire.com/tech-pack-mistakes ; https://sewport.com/tech-pack",
+    "confidence": "high"
+   }
+  ],
+  "recommendations": [
+   "Derive, do not guess: make head circumference the single driver and compute crown-top diameter (C/pi), side-band length, brim inner/outer radii and every graded value for S/M/L from it; print the formula next to each derived number. No surveyed tool does this; all of them emit 'plausible' numbers and disclaim fit.",
+   "Ship a hat-specific POM set with targets AND tolerances: inner head circumference (\u00b11 cm), crown top diameter, side height/crown depth (\u00b10.5), brim width (\u00b10.5), total brim diameter, topstitch distance from edge (\u00b11 mm), eyelet \u00d8/position if any; state measurement method text for each POM (Sewport 5-column convention). Evaluators will check whether S/M/L grade by a consistent 2 cm and whether crown diameter is consistent with circumference.",
+   "Include an operation-sequenced construction sheet (numbered ops, stitch type 301, SPI 8, SA 1 cm, Tex 40 tonal thread, needle 90/14, which colour thread on which side) with the reversible bag-out logic explicit and the single brim topstitch row dimensioned (e.g. 8 mm from edge). Most AI tools output prose 'construction notes'; a real op sheet is the differentiator a factory recognises.",
+   "Do the consumption and costing math visibly: net piece area per colour, marker efficiency assumption, metres per hat per colour at the stated fabric width, per-run totals with shrinkage/waste allowance, fabric grams per hat, and a cost-sheet skeleton (fabric, thread, labels, CM, packaging). Only Audaces and the 3D suites do this and none of the photo-to-pack tools do.",
+   "Model colorways as a matrix, not a note: for a reversible hat each colorway row lists outer shell, inner shell, brim top, brim underside, thread, label, with Pantone TCX + hex (16-0726 TCX #A39264, 19-0303 TCX #2D2C2F), and the BOM must roll up fabric quantity per colour across both colorways (symmetric here) so the buyer can order fabric.",
+   "Exports: PDF (A4, print-safe, RTL-aware), XLSX with real tables (POM grid with formulas so editing M regrades S/L; BOM with qty x price), and a machine-readable JSON of the whole pack for the MASDR RFQ flow. Excel is gated behind $48-130/mo tiers elsewhere; offering all three free in the prototype is a visible win.",
+   "Editability plus provenance: every field editable in the UI, and every AI-inferred value tagged with a confidence level (measured from image / inferred from category default / user-stated) plus an 'Assumptions & open questions for the factory' page. No competitor exposes per-field confidence; The New Black and aitechpacks bury a one-line disclaimer.",
+   "Render the flat as a parametric SVG (crown circle + side band + brim ring, front and side views, plus an exploded pattern-piece view) whose leader lines are bound to the POM values, rather than an AI raster; this makes the drawing consistent with the numbers by construction and prints crisply in both PDF and XLSX.",
+   "Bilingual AR/EN side-by-side (or toggle) with correct RTL layout, Arabic operation names (e.g. \u062d\u064a\u0627\u0643\u0629 \u0632\u062e\u0631\u0641\u064a\u0629 = topstitch, \u0628\u062f\u0644 \u0627\u0644\u062e\u064a\u0627\u0637\u0629 = seam allowance, \u0645\u062d\u064a\u0637 \u0627\u0644\u0631\u0623\u0633 = head circumference) and units in cm first; this is absent from Accio, CALA, The New Black and every other tool and matches MASDR's built-in translation positioning.",
+   "Add a factory-readiness checklist derived from the top rejection causes (missing tolerances, colour by name only, no thread/SPI, no label/packaging spec, no QC criteria) and score the pack; include a QC/inspection block (AQL 2.5, head-form circumference check, metal detection) so the evaluator sees the pack close the loop with production.",
+   "Benchmark visibly against the field in the submission: a one-page table showing that The New Black/aitechpacks/Adstronaut/Genpire/Accio output PDF-only 'plausible' specs with no consumption, no confidence flags, no Arabic, and note that hats are explicitly out of scope for Skema3D/Specter/aitechpacks."
+  ],
+  "open_questions": [
+   "Which target fit does the brand want: standard 3-size run centred on M = 57 cm head (S 55 / M 57 / L 59 finished inner) or an oversized streetwear block (Everybody.World style 58/61/64 cm)?",
+   "Brim width and crown depth targets: classic 6.5-7 cm brim with 9.5 cm side, or short 5 cm 'Y2K' brim / 11-12 cm deep crown? Should S/M/L share brim and depth (typical) or grade them?",
+   "Crown top: plain round crown (2 side panels + top circle) or a 6-panel crown as in most OEM blanks? This changes piece count, seam ops and consumption.",
+   "Is the single brim topstitch row an edge-stitch (2 mm) or one row set in (e.g. 8 mm), and is the thread tonal to each side or one colour throughout?",
+   "Eyelets, chin cord, drawstring adjuster or size label: include any? Where should the woven/care label sit on a reversible hat (one side only, or a loop label at the brim seam)?",
+   "Fabric source: imported 280 gsm twill at 147 cm width vs a local Egyptian mill (width and shrinkage may differ) - which width should the consumption math assume, and is it pre-shrunk?",
+   "Run quantity and colorway split (e.g. 300 pcs, 50/50 khaki-out vs black-out, size ratio 1:2:1) so consumption and cost totals can be stated?",
+   "Units and language priority for the factory: cm-only or cm+inch, and Arabic-primary or English-primary page order?",
+   "Does the evaluator expect a cost sheet (FOB/EXW estimate) in the pack, or only BOM quantities?"
+  ]
+ }
+}

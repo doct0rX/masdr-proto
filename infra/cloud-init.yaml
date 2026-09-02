@@ -1,0 +1,145 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - unzip
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+  - unattended-upgrades
+
+write_files:
+  - path: /etc/caddy/Caddyfile
+    permissions: "0644"
+    content: |
+      {
+        email ${acme_email}
+      }
+      ${domain} {
+        encode zstd gzip
+        request_body {
+          max_size 20MB
+        }
+        header {
+          Strict-Transport-Security "max-age=31536000"
+          X-Content-Type-Options nosniff
+          Referrer-Policy strict-origin-when-cross-origin
+        }
+        reverse_proxy 127.0.0.1:3000 {
+          flush_interval -1
+          transport http {
+            read_timeout 900s
+            write_timeout 900s
+          }
+        }
+      }
+
+  - path: /etc/systemd/system/masdr.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Masdr Tech Pack (Next.js standalone)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      User=masdr
+      Group=masdr
+      WorkingDirectory=/opt/masdr/current
+      EnvironmentFile=/etc/masdr/env
+      ExecStart=/usr/bin/node server.js
+      Restart=always
+      RestartSec=3
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/bin/masdr-env
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # Pull secrets from SSM Parameter Store into a root-owned env file that
+      # systemd injects into the app process. Never logs the values.
+      set -euo pipefail
+      REGION="${region}"
+      PREFIX="${ssm_prefix}"
+      get() { aws ssm get-parameter --region "$REGION" --name "$PREFIX/$1" --with-decryption --query Parameter.Value --output text 2>/dev/null || true; }
+      KEY="$(get ANTHROPIC_API_KEY)"
+      CODE="$(get ACCESS_CODE)"
+      PRIMARY="$(get ANTHROPIC_MODEL_PRIMARY)"
+      WS="$(get ANTHROPIC_WORKSPACE_ID)"
+      umask 077
+      mkdir -p /etc/masdr
+      {
+        echo "NODE_ENV=production"
+        echo "PORT=3000"
+        echo "HOSTNAME=127.0.0.1"
+        echo "DATA_DIR=/var/lib/masdr/data"
+        echo "INTERNAL_BASE_URL=http://127.0.0.1:3000"
+        echo "PLAYWRIGHT_BROWSERS_PATH=/opt/masdr/browsers"
+        echo "JOB_CONCURRENCY=3"
+        echo "S3_BUCKET=${bucket}"
+        echo "AWS_REGION=${region}"
+        [ -n "$KEY" ] && echo "ANTHROPIC_API_KEY=$KEY"
+        [ -n "$CODE" ] && [ "$CODE" != "None" ] && echo "ACCESS_CODE=$CODE"
+        [ -n "$PRIMARY" ] && [ "$PRIMARY" != "None" ] && echo "ANTHROPIC_MODEL_PRIMARY=$PRIMARY"
+        [ -n "$WS" ] && [ "$WS" != "None" ] && echo "ANTHROPIC_WORKSPACE_ID=$WS"
+      } > /etc/masdr/env
+      chown root:masdr /etc/masdr/env
+      chmod 0640 /etc/masdr/env
+      echo "env written ($( [ -n "$KEY" ] && echo 'key present' || echo 'KEY MISSING'))"
+
+  - path: /usr/local/bin/masdr-deploy
+    permissions: "0755"
+    content: |
+      #!/usr/bin/env bash
+      # Download the latest release zip from S3, install it as /opt/masdr/current,
+      # install Chromium for PDF rendering, restart the service.
+      set -euo pipefail
+      BUCKET="${bucket}"
+      REGION="${region}"
+      TS="$(date +%Y%m%d%H%M%S)"
+      REL="/opt/masdr/releases/$TS"
+      mkdir -p "$REL" /opt/masdr/browsers /var/lib/masdr/data
+      aws s3 cp "s3://$BUCKET/releases/latest.zip" /tmp/release.zip --region "$REGION"
+      unzip -q /tmp/release.zip -d "$REL"
+      rm -f /tmp/release.zip
+      chown -R masdr:masdr "$REL" /var/lib/masdr /opt/masdr/browsers
+      export PLAYWRIGHT_BROWSERS_PATH=/opt/masdr/browsers
+      if [ -f "$REL/node_modules/playwright/cli.js" ]; then
+        node "$REL/node_modules/playwright/cli.js" install-deps chromium >/tmp/pw-deps.log 2>&1 || true
+        sudo -u masdr -E node "$REL/node_modules/playwright/cli.js" install chromium >/tmp/pw-install.log 2>&1 || true
+      fi
+      ln -sfn "$REL" /opt/masdr/current
+      /usr/local/bin/masdr-env
+      systemctl daemon-reload
+      systemctl restart masdr
+      # keep the last 3 releases
+      ls -1dt /opt/masdr/releases/* | tail -n +4 | xargs -r rm -rf
+      sleep 3
+      curl -fsS http://127.0.0.1:3000/api/health && echo && echo "deployed $TS"
+
+runcmd:
+  - useradd --system --home /opt/masdr --shell /usr/sbin/nologin masdr || true
+  - mkdir -p /opt/masdr/releases /var/lib/masdr/data /opt/masdr/browsers
+  # Node.js 22
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+  # AWS CLI v2
+  - curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+  - unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install && rm -rf /tmp/aws /tmp/awscliv2.zip
+  # Caddy (automatic HTTPS)
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update && apt-get install -y caddy
+  - systemctl enable --now caddy
+  - systemctl restart caddy
+  # Secrets + first deploy (no-op if no release uploaded yet)
+  - /usr/local/bin/masdr-env || true
+  - /usr/local/bin/masdr-deploy || echo "no release yet; run masdr-deploy after uploading releases/latest.zip"
+  - systemctl enable masdr
+  - chown -R masdr:masdr /var/lib/masdr

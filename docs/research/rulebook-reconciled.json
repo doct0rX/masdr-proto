@@ -1,0 +1,492 @@
+{
+ "sizes": [
+  {
+   "code": "S",
+   "head_girth_range_cm": "55-56",
+   "finished_inner_circumference_cm": 57,
+   "grade_note": "A = HC_max + 1.0 cm ease = 56 + 1 = 57.0 (equivalently mid-range 55.5 + 1.5). Graded -2.0 cm from M on every circumference (A, C, F, band edges); tip diameter -2/pi = -0.64 cm; brim pattern radii -2/(2*pi*cos30) = -0.37 cm; band height -0.5 cm (B = 9.0 + (A-59)/4); brim width constant. Non-overlapping 2 cm head-girth band; label text 'S 55-56 cm'."
+  },
+  {
+   "code": "M",
+   "head_girth_range_cm": "57-58",
+   "finished_inner_circumference_cm": 59,
+   "grade_note": "BASE / SAMPLE SIZE. HC_max = 58, A = 58 + 1.0 = 59.0. Pattern drafted at M; S and L graded by formula, never redrafted. Whole chain derives from A: C = A - 2.5; D = C/pi; R_in = A/(2*pi*cos30); R_out = R_in + E; F = A + 2*pi*E*cos30; B = 9.0 + (A-59)/4; G = B + E; W = A/pi + 2*E*cos30."
+  },
+  {
+   "code": "L",
+   "head_girth_range_cm": "59-60",
+   "finished_inner_circumference_cm": 61,
+   "grade_note": "A = 60 + 1.0 = 61.0. +2.0 cm from M on every circumference; tip diameter +0.64 cm; brim radii +0.37 cm; band height +0.5 cm; brim width constant. The 2 cm grade (brief) matches the 2 cm head-girth bands and keeps tip-seam curvature near-identical across sizes so one notch set / one folder serves all three."
+  }
+ ],
+ "poms": [
+  {
+   "code": "A",
+   "name_en": "Inner head circumference at band/brim seam (wearing line)",
+   "name_ar": "محيط الرأس الداخلي عند درزة الطوق والحافة",
+   "how_to_measure": "Tape run around the inside of the crown exactly on the band/brim seam line, tape flat, no tension, full circle. Measure on BOTH faces (khaki-in and black-in); the two readings must agree within 0.5 cm. Flat check: hat laid flat at the seam line, edge to edge, x2 (A/2 = 28.5 / 29.5 / 30.5).",
+   "S": 57,
+   "M": 59,
+   "L": 61,
+   "tolerance_cm": 1,
+   "derivation": "A = HC_max + 1.0 cm ease (HC_max = 56/58/60, top of each 2 cm band); grade 2.0 cm/size from brief"
+  },
+  {
+   "code": "B",
+   "name_en": "Band (crown side) height, tip seam to band/brim seam",
+   "name_ar": "ارتفاع الطوق (جانب التاج) من درزة القمة إلى درزة الحافة",
+   "how_to_measure": "At the side seam, ruler straight from the tip seam line down to the band/brim seam line following the fabric, hat laid flat, no tension; second check at CF.",
+   "S": 8.5,
+   "M": 9,
+   "L": 9.5,
+   "tolerance_cm": 0.5,
+   "derivation": "B = 9.0 + (A - 59)/4 -> 0.5 cm per size. 9.0 cm at M = industry default classic bucket depth; proportional (not 2 cm) grade so the silhouette does not change per size"
+  },
+  {
+   "code": "C",
+   "name_en": "Tip seam circumference (band top edge)",
+   "name_ar": "محيط درزة القمة",
+   "how_to_measure": "Tape around the outside of the crown exactly on the tip seam line, full circle. Check value only - D is the QC measurement.",
+   "S": 54.5,
+   "M": 56.5,
+   "L": 58.5,
+   "tolerance_cm": 1,
+   "derivation": "C = A - 2.5 (crown taper 2.5 cm total = 1.25 cm per band panel = 0.625 cm at each end of the top edge; taper is an industry default for a gently tapered bucket crown); grades 2.0 cm because A does"
+  },
+  {
+   "code": "D",
+   "name_en": "Crown tip diameter, seam line to seam line",
+   "name_ar": "قطر قمة التاج من درزة إلى درزة",
+   "how_to_measure": "Hat crown up, tip smoothed flat; ruler across the tip through the centre from seam line to seam line. Two readings at 90 deg (CF-CB and side-side), averaged; the two must be within 0.3 cm of each other (roundness).",
+   "S": 17.3,
+   "M": 18,
+   "L": 18.6,
+   "tolerance_cm": 0.3,
+   "derivation": "D = C/pi = (A - 2.5)/pi: 54.5/pi = 17.35, 56.5/pi = 17.98, 58.5/pi = 18.62 (shown to 0.1). Grade 2/pi = 0.64 cm/size. Tolerance = C tolerance / pi (1.0/pi = 0.32) so the tip circle stays inside the band top-edge tolerance"
+  },
+  {
+   "code": "E",
+   "name_en": "Brim width, band/brim seam to finished edge",
+   "name_ar": "عرض الحافة من درزة الطوق إلى الطرف النهائي",
+   "how_to_measure": "At CF, ruler from the band/brim seam line straight out to the topstitched finished edge following the brim surface; repeat at CB and both sides - all four within tolerance.",
+   "S": 6.5,
+   "M": 6.5,
+   "L": 6.5,
+   "tolerance_cm": 0.3,
+   "derivation": "industry default (6.5 cm classic brim) from brief style intent; NOT graded - style constant, the 2 cm circumference grade already enlarges the brim outline"
+  },
+  {
+   "code": "F",
+   "name_en": "Brim outer edge circumference",
+   "name_ar": "محيط الطرف الخارجي للحافة",
+   "how_to_measure": "Tape run along the finished outer edge itself, full circle, hat resting naturally (brim at its 30 deg drop, not forced flat), no stretch.",
+   "S": 92.4,
+   "M": 94.4,
+   "L": 96.4,
+   "tolerance_cm": 1.5,
+   "derivation": "F = A + 2*pi*E*cos30 = A + 35.37 (brim drafted as a cone with 30 deg drop = 60 deg half-angle, industry default bucket silhouette; a flat annulus would give A + 40.8). Grades 2.0 cm because A does"
+  },
+  {
+   "code": "G",
+   "name_en": "Total height flat, brim edge to tip seam",
+   "name_ar": "الارتفاع الكلي مسطحاً من طرف الحافة إلى درزة القمة",
+   "how_to_measure": "Hat folded flat with side seams at the folds, brim extended in line with the band; ruler at CF from the finished brim edge over the band/brim seam to the tip seam line. Control check only.",
+   "S": 15,
+   "M": 15.5,
+   "L": 16,
+   "tolerance_cm": 0.7,
+   "derivation": "G = B + E (derived check POM, not a drafted value); tolerance = B tolerance + E tolerance"
+  },
+  {
+   "code": "H",
+   "name_en": "Brim topstitch offset from finished edge (single row)",
+   "name_ar": "بُعد الحياكة الزخرفية عن طرف الحافة (صف واحد)",
+   "how_to_measure": "Ruler from the finished edge to the centre of the stitch row; 8 points around the brim on the first-off, 4 points (CF, CB, sides) in audits, always on BOTH faces.",
+   "S": 0.6,
+   "M": 0.6,
+   "L": 0.6,
+   "tolerance_cm": 0.1,
+   "derivation": "from brief (single row); 0.6 cm offset = industry default for a bagged edge and is tied to the trimmed SA: SA_trim = H + 0.1 = 0.7 so the row catches the allowance"
+  },
+  {
+   "code": "J",
+   "name_en": "Brand label position below tip seam, CB of the reverse shell",
+   "name_ar": "موضع الماركة أسفل درزة القمة عند منتصف الخلف للغلاف الداخلي",
+   "how_to_measure": "On the reverse shell (black for CW1, khaki for CW2), ruler from the tip seam line to the top edge of the brand woven label at CB; label centred on CB.",
+   "S": 1.5,
+   "M": 1.5,
+   "L": 1.5,
+   "tolerance_cm": 0.3,
+   "derivation": "industry default; not graded (= 2.5 cm from the cut edge of the band panel when sewn flat, J + 1.0 SA)"
+  },
+  {
+   "code": "K",
+   "name_en": "Turning gap length at CB brim edge (in-process only)",
+   "name_ar": "طول فتحة القلب عند منتصف الخلف (أثناء التصنيع)",
+   "how_to_measure": "Length of unsewn bag-out seam between the two gap notches on the outer edge of the back brim half, centred on CB; closed later by the topstitch row, which must be continuous across it.",
+   "S": 8,
+   "M": 8,
+   "L": 8,
+   "tolerance_cm": 1,
+   "derivation": "industry default (6-10 cm for two 280 gsm crowns to pass through); median of the three rulebooks; notches at +/-4 cm from CB"
+  },
+  {
+   "code": "W",
+   "name_en": "Full width across brim on head form, side to side",
+   "name_ar": "العرض الكلي عبر الحافة على قالب الرأس",
+   "how_to_measure": "Hat on the size head form, brim at its natural drop; ruler from brim edge to brim edge through the centre, side to side. Derived check only.",
+   "S": 29.4,
+   "M": 30,
+   "L": 30.7,
+   "tolerance_cm": 1,
+   "derivation": "W = A/pi + 2*E*cos30 (derived from A and E with the 30 deg brim drop): 18.14 + 11.26 / 18.78 + 11.26 / 19.42 + 11.26"
+  }
+ ],
+ "pattern_pieces": [
+  {
+   "name": "Crown tip (top circle) - قمة التاج",
+   "qty_per_shell": 1,
+   "dimensions_M": "Finished dia 18.0 cm (17.98); CUT dia = D + 2 SA = 20.0 cm. S cut 19.3 / L cut 20.6 (grade 2/pi = 0.64 cm).",
+   "notes": "Finished seam circumference pi*D = 56.5 cm = C = sum of the two band top edges - zero ease. 4 notches at quarter points (CF, CB, both sides) matching the two band side seams and the band CF/CB notches. Straight grain CF-CB, twill face up. Identical piece in khaki and black; cut by band knife for a true circle."
+  },
+  {
+   "name": "Side band panel (crown side) - لوح الطوق الجانبي",
+   "qty_per_shell": 2,
+   "dimensions_M": "Finished: bottom (brim) edge A/2 = 29.5 cm, top (tip) edge C/2 = 28.25 cm, height B = 9.0 cm. CUT (1.0 cm SA all round): bottom 31.5, top 30.25, height 11.0 cm. S cut 30.5 / 29.25 x 10.5; L cut 32.5 / 31.25 x 11.5 (grade +/-1.0 on each edge, +/-0.5 height).",
+   "notes": "Frustum development: edges drafted as concentric arcs about R_dev = B*A/(A-C) = 9.0*59/2.5 = 212 cm, sagitta approx 0.5 cm over 29.5 cm; a straight trapezoid is an approximation only (0.5 cm must be eased evenly), the arc version is the master. Taper 0.625 cm at each end of the top edge. Two side seams (left/right, no CB seam) aligned with the two brim seams and the bag-out seam stacks. Notches: CF/CB midpoint on top and bottom edges; ends are the side-seam match points. Grain: warp along the band length (circumference) for stability of A; twill face up. The CB-notched panel of the REVERSE shell carries the labels (sewn flat before the side seams)."
+  },
+  {
+   "name": "Brim half (cone sector) - نصف الحافة",
+   "qty_per_shell": 2,
+   "dimensions_M": "Cone sector, angle per half = 180 deg * cos30 = 155.9 deg. Finished radii: inner R_in = A/(2*pi*cos30) = 10.84 cm, outer R_out = R_in + E = 17.34 cm (width 6.5). CUT radii 9.84 / 18.34 cm plus 1.0 cm SA on both radial (side-seam) ends; bounding box approx 36.5 x 17.5 cm incl. SA. Finished inner arc per half = A/2 = 29.5 cm, outer arc = F/2 = 47.2 cm. S cut radii 9.48 / 17.98 (bbox 35.6 x 17.0); L cut 10.21 / 18.71 (37.0 x 17.6); radius grade 2/(2*pi*cos30) = 0.37 cm.",
+   "notes": "Cone development for a 30 deg brim drop: total sector 360*cos30 = 311.8 deg - the seamed brim slopes 30 deg below horizontal by construction (bucket silhouette), not a flat annulus. Radial seams sit on the band side seams. Notches: CF/CB at the mid-arc of each half (inner and outer edges); two gap notches on the OUTER edge of the back half at +/-4 cm from CB (8 cm turning gap). Inner cut edge (26.8 cm per half) is 2.7 cm shorter than its seam line - clip to 2 mm from the seam line every 2.5 cm before joining to the band. Outer edge receives the bag-out seam (SA later trimmed to 0.7 cm). Grain along the centre (CF/CB) radius, twill face up; 180 deg rotation permitted in the marker, never flipped."
+  }
+ ],
+ "fabric": {
+  "composition": "100% cotton (from brief), combed or carded ring-spun, piece/reactive dyed; two shell colours - Khaki 16-0726 TCX and Jet Black 19-0303 TCX - identical quality, construction and finish in both lots",
+  "weave": "3/1 right-hand (Z) twill, face = 3-up warp-float side, both shells cut twill-face up; target construction 20s x 16s Ne, 128 x 60 ends/picks per inch (industry default for 270-290 gsm chino twill - the mill may substitute any construction meeting gsm +/-5% and shrinkage <=3%)",
+  "gsm": 280,
+  "width_cm": 150,
+  "shrinkage_max_pct": 3,
+  "consumption_m_per_hat_per_colour": 0.17,
+  "consumption_method": "Cut-piece areas from the reconciled pattern incl. 1.0 cm SA, size M per shell (= per colour): tip pi*(20.0/2)^2 = 314 + 2 band (31.5+30.25)/2*11.0 = 2*340 + 2 brim cone-sector halves 2*343 = 1,679 cm2 (S 1,590 / L 1,770; the 1:2:1 size mix averages exactly to M). / 72% marker efficiency (median of the three estimates for small curved pieces on a one-way twill) / 147 cm usable width (150 nominal - 1.5 cm selvedge each side) = 15.9 cm; + 5% for residual shrinkage, lay-end and splice loss = 16.7 cm -> PLANNING figure 0.17 m per hat PER COLOUR. BUYING figure 0.19 m per hat per colour (+10% for faults, shade sorting, size-set/PP/TOP samples and test cuts). Every hat consumes one khaki shell and one black shell, so the order is 0.17 m khaki + 0.17 m black per hat whatever the CW1/CW2 split (500 pcs: 85 m marker / 95 m buy of EACH colour). Mass check: 0.168 m2 x 280 = 47 g per shell, finished hat approx 97 g at M. The factory CAD marker for the actual size ratio overrides this figure - actual m/hat to be reported on the cutting report.",
+  "pre_treatment": "Sanforized / compressive-shrunk, residual shrinkage <=3% warp and weft (ISO 6330 4N, 40 C, line dry), singed, light softener finish. Pattern carries NO shrinkage allowance. If a lot exceeds 3%: pre-wash and tumble the whole lot, relax and re-test before spreading (buy 0.20 m/colour in that case). Relax rolls open 24 h before spreading. Both colour lots tested BEFORE cutting: gsm 280 +/-5% (266-294), crocking ISO 105-X12 dry >=4 / wet >=3, wash ISO 105-C06 A1S change >=4 / staining on cotton >=4, 24 h damp-contact test black-on-khaki with no migration. Black bleeding onto khaki inside the same hat cannot be corrected after assembly - a failing black lot is rejected, not cut."
+ },
+ "thread": [
+  {
+   "use": "All shell construction seams (band side seams, tip set, brim half seams, brim-to-band) and the bag-out brim-edge seam",
+   "type": "Core-spun polyester (polyester filament core, polyester wrap), e.g. Coats Epic / A&E Perma Core / Amann Saba class",
+   "tex": "Tex 30",
+   "ticket": "Tkt 100 (metric)",
+   "needle": "DBx1 (134 R / 16x231) Nm 80/12, R point; Nm 90/14 permitted only if skip stitches occur at 4-ply seam crossings",
+   "colour_rule": "Single-shell seams: DTM the shell being sewn, needle AND bobbin (khaki 16-0726 on the khaki shell, black 19-0303 on the black shell). Bag-out seam through both shells: khaki shell up, khaki needle / black bobbin - the same set-up as the topstitch; never all-black (black stitches would show along the khaki edge where the seam rolls exactly to the edge)."
+  },
+  {
+   "use": "Brim single-row topstitch at 0.6 cm (POM H) and full-round stitch-in-ditch at the band/brim seam through both shells",
+   "type": "Core-spun polyester, topstitch quality (lubricated), same brand family as the seaming thread",
+   "tex": "Tex 40",
+   "ticket": "Tkt 75 (metric)",
+   "needle": "DBx1 Nm 90/14, R point; new needle at every shift start (the 4-ply twill edge dulls the point)",
+   "colour_rule": "ONE rule for the whole run, identical for CW1 and CW2: KHAKI face up under the foot, needle thread khaki DTM 16-0726 TCX, bobbin thread black DTM 19-0303 TCX. Tension balanced on 4-ply scrap so the interlock sits mid-ply - any black visible on the khaki face or khaki on the black face is a major defect. (This is the fixed-orientation form of the general rule 'needle DTM the face up, bobbin DTM the face down'; fixing the orientation means the line never changes set-up between colourways.)"
+  },
+  {
+   "use": "Brand woven label and care label attach (flat, on the reverse-shell band panel before assembly)",
+   "type": "Core-spun polyester, same as seaming thread",
+   "tex": "Tex 30",
+   "ticket": "Tkt 100 (metric)",
+   "needle": "DBx1 Nm 70/10 or 80/12, R point",
+   "colour_rule": "DTM the shell the label is sewn to (black shell for CW1, khaki shell for CW2), needle and bobbin; stitched through that one shell only - label stitching must never appear on the opposite face."
+  }
+ ],
+ "stitching": {
+  "stitch_type_iso4915": "301 lockstitch for every operation (no 401 chainstitch, no 504/overlock - every raw edge is enclosed between the two shells, so no edge neatening exists on this product)",
+  "seam_type_iso4916": "1.01.01 (SSa-1) plain superimposed seam, 1.0 cm SA, for band side seams, tip-to-band, brim half seams and brim-to-band on each shell. Brim outer edge = 1.06.02 (SSe in the A&E seam-type chart: runstitch right sides together, trim, turn, single topstitch row - the collar/cuff bagged-edge construction). Band/brim lock row = 301 stitch-in-ditch on the existing 1.01.01 seam line through both shells (not a new seam class). Labels = 301 flat attach across the two folded ends (end-fold).",
+  "spi_seam": "10-11 SPI (stitch length 2.3-2.5 mm; 12-13 stitches per 3 cm); backtack 3 stitches at seam starts/ends except where noted",
+  "spi_topstitch": "8 SPI (3.2 mm; 9-10 stitches per 3 cm) for the brim topstitch and the stitch-in-ditch - a longer stitch reads cleanly on 280 gsm twill and perforates the edge less (8-9 acceptable). Topstitch ends overlapped 1.5-2 cm at a side seam with NO backtack (visible on both faces); ditch row overlapped 1 cm",
+  "seam_allowance_cm": 1,
+  "topstitch_offset_cm": 0.6,
+  "interfacing": "NONE in the base spec (brief: plain, reversible, packable; 2 x 280 gsm = 560 gsm double brim with a single topstitch row = soft brim). Bag-out SA trimmed to 0.7 cm = topstitch offset + 0.1 so the 0.6 cm row catches and flattens the allowance everywhere. Option (decide at the fit sample, freeze before the size set): if the brim is judged too soft, fuse BOTH brim sets identically with a 40-50 g/m2 bias-cut woven fusible trimmed 1.0 cm inside all seam lines (130-150 C / 12-15 s / 2.5 bar), which adds a graded piece and +0.4 SAM - never one shell only (asymmetric fusing curls the brim toward the unfused face after washing and gives the two faces unequal hand). Extra topstitch rows are a brief change, not a factory option."
+ },
+ "operations": [
+  {
+   "step": 1,
+   "operation_en": "Fabric inspection, shade sorting, lot tests (shrinkage, crocking, wash staining) and 24 h relaxation",
+   "operation_ar": "فحص القماش وفرز الدرجات اللونية واختبار الانكماش والاحتكاك لكل دفعة وإراحة القماش 24 ساعة",
+   "machine": "Inspection frame / 4-point table, GSM cutter, D65 shade lamp, wash tester",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "4-point <=20 pts/100 m2; gsm 280 +/-5% per roll; every roll approved against the signed lab dip (dE CMC 2:1 <=1.0) and grouped by shade - never mix groups within a lay; shrinkage <=3%, crocking and wash-staining results on file for BOTH lots before release; relax 24 h open. Record lot/roll numbers on the cut ticket. Approx 0.3 min/hat amortised."
+  },
+  {
+   "step": 2,
+   "operation_en": "Spread and cut both colours from the SAME marker, notch all match points, bundle by size with colourway-coded tickets, pair one khaki bundle with one black bundle per size",
+   "operation_ar": "فرد القماش وقص اللونين بماركر واحد وعمل العلامات وتجميع الحزم بتذاكر تحمل كود اللون وإقران حزمة كاكي مع حزمة سوداء من نفس المقاس",
+   "machine": "Manual/auto spreader, straight knife (band knife for tip circles and brim arcs), notcher",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "One-way lay, twill face up, <=50 plies (approx 2.5-3 cm). The same marker file runs on the khaki and the black lay with identical ply counts so shell counts match (every hat needs one of each). 180 deg rotation of pieces allowed for marker efficiency (twill diagonal is invariant), never flipped face-down; confirm no shading on the first lay. Per shell: 1 tip, 2 band panels, 2 brim halves. Notches: tip 4; band CF/CB mid top and bottom; brim CF/CB mid-arc inner and outer + 2 gap notches on the outer edge of the back half at +/-4 cm from CB. No drilling (both faces are visible). Bundle tickets carry size AND colourway code in the ordered ratio - the code only decides which shell gets the labels at step 3. Approx 1.2 min/hat amortised, excluded from the sewing SAM."
+  },
+  {
+   "step": 3,
+   "operation_en": "Sew brand woven label and care label flat onto the CB band panel of the REVERSE shell only (CW1: black panel; CW2: khaki panel)",
+   "operation_ar": "تركيب الماركة المنسوجة وبطاقة العناية على لوح الطوق الخلفي المسطح للغلاف الداخلي فقط (اللون الأول: أسود، اللون الثاني: كاكي)",
+   "machine": "SNLS flat bed (Juki DDL-8700 class) or label-attach machine, Nm 70-80, Tex 30",
+   "stitch": "301",
+   "spi": "10-11",
+   "notes": "THE ONLY OPERATION THAT DIFFERS BETWEEN CW1 AND CW2 - split bundles here and keep them separate through packing. Flat work on the CB-notched panel: brand label top edge 2.5 cm below the cut edge (= POM J 1.5 + 1.0 SA), centred on the CB notch, end-fold label sewn across its two folded ends only (leaves the tunnel for the hangtag string). Care label (folded loop 3.5 x 3.0) sewn across its open top ends 0.5 cm below the brand label, bottom at 7.0 cm below the tip seam line = >=1.5 cm clear of the band/brim seam at size S. Thread DTM shell, through this one shell only. Wrong-shell labelling = critical defect. SAM 0.8 per hat."
+  },
+  {
+   "step": 4,
+   "operation_en": "Join band side seams (2 per shell) and press open",
+   "operation_ar": "حياكة درزتي جانب الطوق لكل غلاف ثم كيهما مفتوحتين",
+   "machine": "SNLS flat bed, Nm 80/12, Tex 30 + steam iron on vacuum table",
+   "stitch": "301 / 1.01.01",
+   "spi": "10-11",
+   "notes": "1.0 cm SA, taper at the top edge, backtack. Press seams OPEN through a press cloth (black) so no ridge shows on either face; no topstitch (hidden between the shells). Both shells identical. SAM 0.6 + 0.3 press per shell."
+  },
+  {
+   "step": 5,
+   "operation_en": "Set crown tip into band top edge matching 4 notches, zero ease; press SA toward band; NO edge-stitch",
+   "operation_ar": "تركيب قمة التاج على الحافة العلوية للطوق مع مطابقة أربع علامات بدون فضل، وكي بدل الخياطة باتجاه الطوق بدون حياكة حافة",
+   "machine": "SNLS cylinder bed (Juki DSC-245 / Pfaff 335 class) with edge guide; flat bed acceptable for samples",
+   "stitch": "301 / 1.01.01",
+   "spi": "10-11",
+   "notes": "Tip underneath, band on top; match the 2 side seams + CF + CB; zero ease (pi*D = band top edge = C = 56.5 at M). Clip band top-edge SA every 3 cm only if it will not follow the curve. Press SA toward the band. No edge-stitch - the brim row is the only briefed topstitch and the tip SA is enclosed between the nested crowns. Check D and roundness (two readings within 0.3 cm) on the first bundle. SAM 1.2 per shell."
+  },
+  {
+   "step": 6,
+   "operation_en": "Join brim halves at both radial (side) seams and press open",
+   "operation_ar": "حياكة نصفي الحافة عند الجنبين ثم كي الدرزتين مفتوحتين",
+   "machine": "SNLS flat bed, Nm 80/12, Tex 30 + iron",
+   "stitch": "301 / 1.01.01",
+   "spi": "10-11",
+   "notes": "1.0 cm SA; seam ends must be square to the arcs or the cone will not lie true. Press open. These seams sit on the band side seams at step 8 and carry the topstitch start/overlap at step 13. Keep the two gap notches on the back half's outer edge. SAM 0.5 + 0.2 press per shell."
+  },
+  {
+   "step": 7,
+   "operation_en": "Clip brim inner-arc seam allowance every 2.5 cm to 2 mm from the seam line",
+   "operation_ar": "عمل شقوق في بدل خياطة القوس الداخلي للحافة كل 2.5 سم حتى 2 مم من خط الحياكة",
+   "machine": "Hand, scissors",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "The inner cut edge per half (2*pi*9.84*155.9/360 = 26.8 cm) is 2.7 cm shorter than its seam line (29.5 cm): clipping lets the concave allowance open out onto the near-straight band edge without puckers. Not through the seam line. SAM 0.2 per shell."
+  },
+  {
+   "step": 8,
+   "operation_en": "Attach brim inner arc to band bottom edge: brim seams on band side seams, CF/CB notches matched; press SA toward band",
+   "operation_ar": "تركيب الحافة على الطوق مع مطابقة درزات الجنب وعلامات المنتصف الأمامي والخلفي، وكي بدل الخياطة باتجاه الطوق",
+   "machine": "SNLS cylinder bed with edge guide, Nm 80/12, Tex 30",
+   "stitch": "301 / 1.01.01",
+   "spi": "10-11",
+   "notes": "Brim on top, 1.0 cm SA; band bottom edge = brim inner arc = A/2 per half, no ease. Press SA toward the band on BOTH shells so they nest the same way. No edge-stitch here - the seam is locked later by the ditch row. This seam line is POM A: measure a first-off of each size before continuing. SAM 1.1 per shell."
+  },
+  {
+   "step": 9,
+   "operation_en": "Repeat steps 4-8 for the second shell in the other colour; pair one khaki and one black shell of the same size and compare A",
+   "operation_ar": "تكرار الخطوات 4-8 للغلاف الثاني باللون الآخر، وإقران غلاف كاكي مع غلاف أسود من نفس المقاس ومقارنة المحيط A",
+   "machine": "-",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "Both shells of a hat come from the paired bundles of the same size. Compare A of the two shells: difference <=0.5 cm, otherwise the reversible edge will twist. The shell carrying the labels is the REVERSE shell of that colourway."
+  },
+  {
+   "step": 10,
+   "operation_en": "Bag-out seam: shells right sides together, crowns pointing away, all seams stacked; sew brim outer edge at 1.0 cm leaving the 8 cm turning gap at CB between the gap notches",
+   "operation_ar": "حياكة التقفيل: وضع الغلافين وجهاً لوجه مع مطابقة الدرزات والعلامات، وحياكة الطرف الخارجي للحافة مع ترك فتحة قلب 8 سم في منتصف الخلف",
+   "machine": "SNLS flat bed with 1.0 cm edge guide, Nm 80/12, Tex 30; khaki shell up, khaki needle / black bobbin",
+   "stitch": "301 / 1.01.01 (becomes 1.06.02 after turning + topstitch)",
+   "spi": "10-11",
+   "notes": "Stack band side seams, brim seams and band/brim seams of both shells exactly (misalignment >0.5 cm = major); pin/clip at 8 points first. 1.0 cm SA EXACTLY - this seam is the finished edge (POM F); any variation shows as a wavy edge on both faces. Gap (POM K) 8 +/-1 cm centred on CB, backtack 3 stitches at both gap ends. SAM 1.3."
+  },
+  {
+   "step": 11,
+   "operation_en": "Trim bag-out seam allowance to 0.7 cm except the gap zone; snip only at the gap ends",
+   "operation_ar": "تشذيب بدل خياطة التقفيل إلى 0.7 سم حول الحافة ما عدا منطقة الفتحة، وعمل شق عند طرفي الفتحة فقط",
+   "machine": "Bench shears / rotary trimmer",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "Trim both layers together to 0.7 cm (= topstitch offset + 0.1) around the brim EXCEPT a 10 cm zone centred on the gap, left at 1.0 cm so the folded-in gap allowances are caught by the topstitch. The outer edge is convex (R 17.3): no notching - the 0.7 cm SA edge is only 3.8 cm longer than the seam line over 94 cm; snip at the two gap ends only. SAM 0.5."
+  },
+  {
+   "step": 12,
+   "operation_en": "Turn through the gap, roll the seam exactly to the edge, press brim flat favouring neither face, fold gap allowances in 1.0 cm and press",
+   "operation_ar": "قلب القبعة من الفتحة ودحرجة الدرزة إلى الطرف تماماً وكي الحافة مسطحة دون ميل لأي وجه، وثني بدل الخياطة عند الفتحة 1.0 سم للداخل",
+   "machine": "Steam iron on vacuum table, press cloth, edge turner",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "Pull both crowns through the gap; roll the seam dead on the edge (a 1-2 mm roll shows as a colour line on the other face). Nest the crowns tip-to-tip with side seams stacked, no twist. Fold gap allowances in 1.0 cm on both layers and press. Press from the khaki face through a cloth - no shine on black. SAM 0.9."
+  },
+  {
+   "step": 13,
+   "operation_en": "Single-row brim topstitch 0.6 cm from the edge, full circle, khaki face up, closing the gap in the same pass",
+   "operation_ar": "حياكة زخرفية صف واحد على بعد 0.6 سم من طرف الحافة حول القبعة كاملة والوجه الكاكي لأعلى مع إغلاق الفتحة في نفس المرور",
+   "machine": "SNLS flat bed with 6 mm edge guide / compensating foot, Nm 90/14, Tex 40",
+   "stitch": "301",
+   "spi": "8",
+   "notes": "Khaki face up, khaki needle / black bobbin (fixed rule for both colourways). Start at a side seam, 0.6 +/-0.1 cm from the edge, parallel +/-1 mm; overlap 1.5-2 cm at the end, NO backtack, pull tails inside and trim. Run a 10 cm test on 4-ply scrap and check both faces before every run. POM H checked at 8 points on both faces on the first-off. SAM 1.0."
+  },
+  {
+   "step": 14,
+   "operation_en": "Stitch-in-the-ditch at the band/brim seam through both shells, full circle (lock row)",
+   "operation_ar": "حياكة في مجرى درزة الطوق مع الحافة عبر الغلافين حول القبعة كاملة لتثبيت الغلافين معاً",
+   "machine": "SNLS cylinder bed with stitch-in-seam guide, Nm 90/14, Tex 40",
+   "stitch": "301 in the seam groove",
+   "spi": "8-9",
+   "notes": "Khaki face up, khaki needle / black bobbin. Both shells' band/brim seams stacked so the needle runs in the groove of both; full round, overlap 1 cm. Invisible on both faces. Locks the two shells so the crowns cannot balloon apart and the brim layers cannot shift when the hat is reversed, and fixes A on both faces. SAM 0.8."
+  },
+  {
+   "step": 15,
+   "operation_en": "Trim threads; final steam press on head block; shape brim to its natural 30 deg drop; present with the colourway's OUTER shell outward",
+   "operation_ar": "قص الخيوط والكي النهائي بالبخار على قالب الرأس وتشكيل الحافة بميل 30 درجة مع إخراج الغلاف الخارجي للون",
+   "machine": "Steam head block / hat press, press cloth, thread sucker",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "Block circumference = A (57 / 59 / 61). Crown round, brim at 30 deg, edge flat, no creases, no shine on black (press cloth). The line sews everything khaki-out; CW2 hats are reversed here (black outward, labels inside). SAM 0.8."
+  },
+  {
+   "step": 16,
+   "operation_en": "Inspect both faces and measure per the audit plan",
+   "operation_ar": "فحص الوجهين وقياس القبعة حسب جدول القياسات",
+   "machine": "Inspection table, tape, head form",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "Inspect khaki-out, reverse, inspect black-out. Measure A on both faces, B, D, E, H (F, G, W, C, J on 3 of 10). Reject: opposite-colour stitch dots, seam rolled >2 mm to one face, wavy edge, twisted or ballooning crowns, gap not fully closed, labels on the wrong shell for the bundle's colourway or label stitching visible on the outer face. SAM 0.7."
+  },
+  {
+   "step": 17,
+   "operation_en": "Hangtag on string through the brand label; fold with the colourway's outer face out; polybag with SKU sticker",
+   "operation_ar": "تعليق البطاقة بخيط عبر الماركة، الطي بالوجه الخارجي للون للخارج، التعبئة في كيس مع ملصق المقاس واللون",
+   "machine": "Packing table (no tagging gun)",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "Cotton string + plastic loop-lock passed under the brand label between its two sewn ends - no needle holes on a two-faced product. Fold the brim up over the crown once, hinging at the band/brim seam (no crease in the twill body), outer face of the colourway outward, labels inside, hangtag visible through the bag; polybag; SKU sticker bottom right. CW1 packed khaki-out, CW2 black-out. SAM 0.8."
+  },
+  {
+   "step": 18,
+   "operation_en": "Inner packing and carton packing with marks",
+   "operation_ar": "التعبئة في الكراتين ووضع العلامات",
+   "machine": "Packing station",
+   "stitch": "-",
+   "spi": "-",
+   "notes": "10 pcs solid size / solid colourway per inner bundle; 40 pcs (4 inners) per export carton, one colourway per carton; marks per the packaging list. Packing list must state the colourway by code AND colour names because CW1 and CW2 hats are physically identical. Approx 0.2 min/hat."
+  }
+ ],
+ "sam_estimate": "Operation-based estimate (no published headwear SAM exists - replace with a first-bundle time study). Per shell: side seams 0.6 + press 0.3 + tip set 1.2 + brim halves 0.5 + press 0.2 + clip 0.2 + brim attach 1.1 = 4.1 min x 2 shells = 8.2. Labels (both, flat) 0.8. Assembly: bag-out 1.3 + trim 0.5 + turn/press 0.9 + topstitch 1.0 + ditch 0.8 = 4.5. SEWING + PRESSING SAM approx 13.5 min per hat. Finishing: final press 0.8 + inspect/measure 0.7 + tag/fold/bag 0.8 + carton 0.2 = 2.5. Cutting/bundling approx 1.2 and fabric inspection approx 0.3 amortised. TOTAL approx 17.5 min per hat. At 80% efficiency one operator makes about 22 hats per 8 h; a 6-operator mini-line (2 shell prep, 1 cylinder-bed tip/brim, 1 bag-out/trim/turn, 1 topstitch/ditch, 1 press/finish) yields about 160-170 hats per 8 h day; 500 pcs approx 3-3.5 line-days after the size set. CMT cost driver = 13.5 sewing SAM x factory minute rate. Colourway does not change SAM - the only branch is which shell receives the labels.",
+ "labels": [
+  {
+   "type": "Main brand label - woven damask, high-definition, end-fold, approx 4.0 x 2.0 cm folded, laser-cut / heat-sealed edges, tonal ground per brand artwork (one artwork used on both colourways)",
+   "placement": "REVERSE shell only, CB of the side band, top edge 1.5 cm below the tip seam line (POM J), centred on the CB notch, sewn across its two folded ends only (301, thread DTM shell) on the flat panel at step 3. CW1 (khaki outer) -> on the BLACK shell; CW2 (black outer) -> on the KHAKI shell.",
+   "content": "Brand logo / wordmark per brand artwork (EN and/or AR); optional 'REVERSIBLE / يقلب على الوجهين' woven on the back face. No fibre or care data on this label.",
+   "notes": "The label side is THE physical differentiator between CW1 and CW2. Because the hat is reversible the label is exposed when worn label-side out - the brand must accept this or supply a tonal flat label (decision needed before the label PO). The unsewn top/bottom edges form the tunnel for the hangtag string. Woven, not printed, so it survives outside wear; edges must not scratch (no raw ultrasonic cut)."
+  },
+  {
+   "type": "Care / content / origin / size label - printed satin (or recycled PES), single-side print black 19-0303 on white 11-0601 ground, strip 3.5 x 6.0 cm folded in half print-out to a 3.5 x 3.0 cm loop, sealed edges, bilingual AR/EN",
+   "placement": "Same REVERSE shell, directly below the brand label with a 0.5 cm gap (top at 4.0 cm below the tip seam), centred CB; open ends sewn together across the top with one 301 row through that shell only, fold at the bottom. Label bottom at 7.0 cm = >=1.5 cm clear of the band/brim seam and the ditch row at size S (B = 8.5).",
+   "content": "Front: 100% قطن / 100% COTTON - ISO 3758 symbols per ES 1405 with Arabic text under each: غسيل 30° لطيف / wash 30 C mild - لا يستخدم مبيض / do not bleach - لا يجفف في المجفف / do not tumble dry - كي بحرارة متوسطة / iron medium (2 dots) - لا ينظف جافاً / do not dry clean - 'اغسل مع الألوان الداكنة مقلوباً في أول غسلتين / wash with darks, inside out, first 2 washes'. Back: المقاس / SIZE 'S 55-56 سم' | 'M 57-58 سم' | 'L 59-60 سم' - صنع في مصر / MADE IN EGYPT - manufacturer or brand legal name and address in Arabic (TBC by brand) - style no., colourway code CW1/CW2, PO/lot.",
+   "notes": "Egyptian domestic market: fibre %, care, country of origin and producer identity must be in Arabic on a permanent label sewn at production (ES 7266-3 and ES 7266-4 / Decree 197/2023; care symbols ES 1405 = ISO 3758) - stickers not accepted. Size printed as the head-girth RANGE, never the finished 59 cm. Dark-first wash note because black and khaki are one article. Wording to be checked against the current EOS text by the brand's compliance contact before print; label must be soft (no scalp scratch)."
+  },
+  {
+   "type": "Size identification (no separate size tab)",
+   "placement": "On the back of the care label, on the hangtag and on the polybag / SKU sticker",
+   "content": "S 55-56 cm | M 57-58 cm | L 59-60 cm (head girth range, EN 13402 style)",
+   "notes": "Avoids a third visible label on a reversible crown. Optional: size letter woven on the back face of the brand label. 6 SKUs = 3 sizes x 2 colourways, one barcode each."
+  },
+  {
+   "type": "Hangtag / swing ticket - 300 gsm card, approx 5 x 9 cm, printed both sides AR/EN, cotton string + plastic loop-lock",
+   "placement": "String passed under the brand woven label (between its two sewn ends) on the reverse shell, tag hanging out over the brim edge; hat presented with the colourway's OUTER face outward. No tagging gun anywhere on the product - a pin hole shows on both faces.",
+   "content": "Front: brand logo, 'قبعة باكيت تقلب على الوجهين / Reversible bucket hat'. Back: style no., COLOURWAY code and names (CW1 'Khaki / reverse Black' - كاكي / الوجه الآخر أسود; CW2 'Black / reverse Khaki' - أسود / الوجه الآخر كاكي), size with cm range, 100% cotton / 100% قطن, Made in Egypt / صنع في مصر, EAN/QR barcode per SKU, price field.",
+   "notes": "Second differentiator between CW1 and CW2 (with the label side). Two print versions or one version with a tick box. Fallback only if the brand supplies a label with no tunnel: a fine plastic tag pin through the brim edge at CB inside the 0.6 cm topstitch zone, <=0.4 cm from the edge, never through the body of the twill."
+  },
+  {
+   "type": "Polybag / SKU sticker, self-adhesive, approx 50 x 30 mm",
+   "placement": "Outside of the polybag, bottom right",
+   "content": "Brand, style no., colourway code + colour names (CW1 KHAKI/BLACK - كاكي/أسود; CW2 BLACK/KHAKI - أسود/كاكي), size S/M/L with cm range, EAN barcode (one per SKU), qty 1, Made in Egypt / صنع في مصر",
+   "notes": "Hat packed with the colourway's OUTER face outward so the sticker and the visible colour agree; sticker CW code must match the label side inside (100% audit at packing)."
+  }
+ ],
+ "packaging": [
+  "Fold: after final press, fold the brim up over the crown once, hinging at the band/brim seam (no crease in the twill body), crown gently flattened, outer face of the colourway outward (CW1 khaki, CW2 black), labels inside, hangtag visible through the bag; never fold across the tip seam.",
+  "Individual clear LDPE polybag 25 x 30 cm, min 40 micron, self-seal flap, printed suffocation warning in Arabic and English (تحذير: احفظ الكيس بعيداً عن الأطفال / Warning: keep away from children), recycling code 4; one hat per bag, SKU sticker bottom right.",
+  "Inner pack: 10 pcs solid style / solid colourway / solid size per polybag bundle (ratio packs only if the brand instructs); size ratio for the run assumed 1 S : 2 M : 1 L - confirm on the PO.",
+  "Export / master carton: double-wall (BC flute) corrugated approx 50 x 40 x 30 cm, 40 pcs = 4 inner bundles, one colourway per carton, gross approx 5 kg (hat approx 100 g + bag/tag approx 12 g + carton), max 10 kg if the brand asks for larger packs; sealed with brown tape, no metal staples; carton size confirmed by the factory after PP samples are measured.",
+  "Carton marks (AR + EN, two opposite sides, black print only): brand, style no., colourway CODE and colour names, size, quantity, carton n of N, gross/net weight, dimensions, 'Made in Egypt / صنع في مصر', 'this side up' and 'keep dry' pictograms; packing list inside carton 1 stating colourway by code AND names (the hats in CW1 and CW2 cartons are physically identical).",
+  "No cardboard crown former, no tissue, no silica gel in contact with the product (packable soft hat by design); domestic shipment - silica gel not required; store cartons off the floor and ship dry (khaki twill shows water marks).",
+  "No metal in the product or the pack: no pins, no staples, no tagging-gun pins; hangtag on string with plastic loop-lock only.",
+  "Sealed pre-production sample of size M for each colourway (photographed khaki-out and black-out) held at the factory and at the brand as the packing and presentation reference."
+ ],
+ "qc": [
+  "Fabric, per colour lot before cutting (reports retained): gsm 280 +/-5% (ISO 3801); width 150 cm; dimensional change <=3% warp/weft (ISO 6330 4N 40 C x3 / ISO 5077); colour fastness to washing ISO 105-C06 A1S change >=4, staining on cotton >=4; rubbing ISO 105-X12 dry >=4 / wet >=3; 24 h damp-contact black-on-khaki with no migration; pH 4.0-7.5 and restricted substances (azo dyes, formaldehyde) per ES 7266 from the mill report; shade against the signed lab dip under D65, dE CMC(2:1) <=1.0; cross-staining: wash one finished sample hat 3 x 40 C - khaki shell staining >=4 grey scale.",
+  "Pattern / cut audit on the first lay of each colour: tip cut dia 20.0, band cut 31.5 / 30.25 x 11.0, brim cut radii 9.84 / 18.34 with 155.9 deg sector at M (+/-0.15 cm); all notches present (tip 4, band 4, brim 4 + 2 gap notches); twill face up, no flipped pieces; ply counts identical on the khaki and black lays.",
+  "In-line: first-off approval per operator, then 2-hourly roving audit of 5 pcs - SA 1.0 +/-0.1; SPI 10-11 seams / 8 topstitch; after step 5 tip diameter D and roundness on 3 pcs per bundle; after step 8 POM A per shell; after step 10 bag-out SA 1.0 +/-0.1 and seam stacking <=0.5 cm; after step 13 POM H 0.6 +/-0.1 at 8 points on both faces and no opposite-colour stitch dots (10x loupe at line start and every 50 pcs).",
+  "Measurement audit: first 20 hats per size 100% measured, then 10 pcs per size per colourway against the POM table (A on both faces, B, D, E, H on all; C, F, G, J, W on 3 of them). A or D out of tolerance = major; E or H = minor within 2x tolerance, major beyond; record on the graded spec sheet with Arabic POM names and sign off before packing.",
+  "Reversible-specific visual checks on EVERY inspected hat, both faces (inspect khaki-out, reverse, inspect black-out): brim edge seam sits on the edge (no colour line on the other face; roll >2 mm = major); no bobbin colour visible on either face of the topstitch; ditch row invisible on both faces and complete (brims not separating); band/brim and side seams of the two shells stacked within 0.5 cm; crowns nested without twist or ballooning; turning gap closed inside the topstitch row with no raw edge; no label stitching visible on the outer face; no press shine on black, no water marks on khaki.",
+  "Colourway audit (critical, Ac 0): CW1 hats carry both labels on the BLACK shell and are packed khaki-out; CW2 labels on the KHAKI shell, packed black-out; hangtag code and polybag sticker match the label side; 100% check at packing - the label side is the only physical difference between the SKUs.",
+  "Head-form / block check: size M pressed on a 59 cm block sits on a 58 cm head form with approx 1 cm free play; S and L on 56 / 60 cm forms; brim natural drop approx 30 deg on both faces.",
+  "Finished hat weight audit: M approx 97 g +/-8% (S approx 92, L approx 102) - detects substituted fabric or an unapproved fusible.",
+  "Sewing quality: 12-13 st/3 cm seams, 9-10 st/3 cm topstitch checked on 5 hats per hour; no skipped stitches; no puckering at the tip seam (two D readings within 0.3 cm); no needle cuts at the brim edge; threads trimmed. Seam strength spot test on 3 hats per run: tip seam and bag-out seam hold 150 N (ISO 13935-2) / no opening under a firm hand pull.",
+  "Needle and metal policy: needle change every shift or on any burr; needle-count log and broken-needle procedure; no metal components in product or pack; metal detection only if the brand's channel requires it.",
+  "Acceptance sampling ISO 2859-1, General Inspection Level II, single sampling normal, AQL 2.5 major / 4.0 minor / 0 critical, applied per PO and per colourway per size (e.g. lot 281-500: code H, n = 50, major Ac 3 / Re 4, minor Ac 5 / Re 6). Critical = needle fragment, wrong label content or origin, wrong colourway label side.",
+  "Approval gates: proto size M (worn khaki-out and black-out from the same hat; decide brim stiffness and the visible-label question) -> size set S/M/L on head forms -> sealed PP sample per colourway showing label side and fold direction -> TOP samples 2 pcs per SKU within the first 10% of output."
+ ],
+ "colour_refs": [
+  {
+   "name": "Khaki (shell colour 1; outer for CW1, reverse for CW2; DTM seaming thread on the khaki shell; needle thread for topstitch, ditch and bag-out seam)",
+   "pantone_tcx": "16-0726 TCX Khaki",
+   "hex": "#A39264"
+  },
+  {
+   "name": "Jet Black (shell colour 2; reverse for CW1, outer for CW2; DTM seaming thread on the black shell; bobbin thread for topstitch, ditch and bag-out seam)",
+   "pantone_tcx": "19-0303 TCX Jet Black",
+   "hex": "#2D2C2F"
+  },
+  {
+   "name": "Care label ground (print in Jet Black 19-0303 TCX), both colourways",
+   "pantone_tcx": "11-0601 TCX Bright White",
+   "hex": "#F4F5F0"
+  }
+ ],
+ "assumptions": [
+  "FROM BRIEF: 100% cotton twill approx 280 gsm; reversible; two colourways khaki/black (CW1) and black/khaki (CW2); sizes S/M/L with a 2 cm grade; single-row brim topstitch; plain (no eyelets, chin cord, sweatband, lining, adjuster or interfacing); metric; first production run for a small Egyptian brand.",
+  "Fit block: standard adult unisex; head-girth bands S 55-56 / M 57-58 / L 59-60 cm (non-overlapping 2 cm bands, base M on the Egyptian adult median approx 57-58 cm); wearing ease 1.0 cm on the top of each band: A = HC_max + 1.0. The three rulebooks' ease statements (top + 1.0, mid + 1.5, bottom + 2.0) are the same numbers: 57 / 59 / 61.",
+  "Geometry constants (industry defaults, adjustable at the fit sample): crown taper 2.5 cm (C = A - 2.5; taper 0 would be a straight band with D = A/pi); band height 9.0 cm at M with B = 9.0 + (A - 59)/4; brim width 6.5 cm ungraded; brim drop 30 deg (cone sector 360*cos30 = 311.8 deg); label 1.5 cm below the tip seam; turning gap 8 cm.",
+  "Derived chain, all from A: C = A - 2.5; D = C/pi; R_in = A/(2*pi*cos30); R_out = R_in + E; sector per brim half = 180*cos30 = 155.9 deg; F = 2*pi*R_out*cos30 = A + 35.4; W = A/pi + 2*E*cos30; G = B + E; band development radius R_dev = B*A/(A - C) approx 212 cm; brim radius grade 2/(2*pi*cos30) = 0.37 cm; tip grade 2/pi = 0.64 cm.",
+  "Seam allowance 1.0 cm throughout; bag-out SA trimmed to 0.7 cm = topstitch offset 0.6 + 0.1 (the pair moves together); turning gap 8 +/-1 cm at the CB brim edge - all sized for 2 x 280 gsm twill.",
+  "Fabric 150 cm nominal / 147 cm usable, sanforized <=3%, one shade lot per colour per run; the 20 x 16 Ne / 128 x 60 construction is a target for the mill, not a buyer requirement. If the mill supplies 145 cm usable or unsanforized cloth, consumption becomes approx 0.18-0.20 m per colour and an unsanforized lot must be pre-washed.",
+  "Consumption: 72% marker efficiency (planning), 5% shrinkage/end-loss, +10% buying buffer, size ratio 1:2:1, colourway split 50/50 - fabric need per colour is identical for any split because every hat uses one khaki and one black shell. The factory CAD marker overrides the planning figure.",
+  "Thread / needle / SPI: Tex 30 (Tkt 100) core-spun seaming with Nm 80/12; Tex 40 (Tkt 75) topstitch and ditch with Nm 90/14; 301 throughout; 10-11 SPI seams, 8 SPI topstitch - industry defaults for medium-heavy cotton twill. Thread approx 20 m per hat (approx 10 m per colour; 301 consumes approx 3 x the 5.7 m of seam length): for 500 pcs order 2 cones Tex 30 (5,000 m) + 1 cone Tex 40 per colour.",
+  "Construction: two side-seam band panels; two brim halves seamed at the sides in line with the band seams; plain round crown with the tip seam not edge-stitched; band/brim seam allowances pressed toward the band on both shells; full-round stitch-in-ditch lock row; labels sewn flat on the reverse-shell band panel before assembly.",
+  "Labelling for Egyptian domestic sale only (Arabic mandatory for fibre %, care, origin and producer - ES 7266-3 / ES 7266-4; care symbols ES 1405 = ISO 3758); export fields (EU 1007/2011, US FTC/RN, GSO) not included. Brand artwork, legal name/address and barcodes are placeholders to be supplied by the brand; ES texts to be verified by the brand's compliance contact before label print.",
+  "Order quantity unknown; AQL examples use a 281-500 pcs lot; carton dimensions and pack assortment TBC by the factory after PP samples are measured.",
+  "SAM values are estimates pending a first-bundle time study; no published headwear SAM exists.",
+  "Pantone TCX numbers and hex values (16-0726 #A39264, 19-0303 #2D2C2F, 11-0601 #F4F5F0) are references for lab-dip approval only; the colour standard is the buyer-signed lab dip on the actual twill, not a screen colour.",
+  "Seam-type nomenclature checked against the A&E seam-type chart (amefird.com, 2006): SSa = ISO 4916 1.01; runstitch-and-topstitch bagged edge (collar/cuff type) = SSe 1.06.02; SSae 1.06.03 is the facing-edgestitch variant and is not the construction used here."
+ ],
+ "notes": [
+  "CW1 (khaki outer / black reverse) and CW2 (black outer / khaki reverse) are PHYSICALLY THE SAME HAT: same pattern, same two shells, same threads and thread-colour rule, same consumption per colour, same SAM. Cut and sew all shells as one pool; the only branch is step 3 (labels on the black shell = CW1, on the khaki shell = CW2) plus the hangtag code, the polybag SKU sticker and the face folded outward at packing. Six SKUs exist for stock and barcode purposes only.",
+  "RESOLVED - size ranges: Rulebook 2's overlapping bands (54-56 / 56-58 / 58-60 with 2 cm ease on a nominal mid) were replaced by the non-overlapping bands of Rulebooks 1 and 3 (55-56 / 57-58 / 59-60 with A = HC_max + 1.0). All three give the same finished A (57 / 59 / 61); the non-overlapping form is unambiguous on the care label and matches the 2 cm grade.",
+  "RESOLVED - brim geometry: Rulebook 1 drafted a flat 360 deg annulus (F = A + 40.8, R_in = A/2pi); Rulebooks 2 and 3 a 30 deg cone (F = A + 35.4, R_in = A/(2*pi*cos30), 311.8 deg sector). The cone was adopted: it is the bucket silhouette, it gives an unfused 2 x 280 gsm brim a controlled drop instead of uncontrolled droop, and the arcs verify exactly (inner arc 2 x 29.5 = 59.0 = A; outer arc 94.4 = F at M). A flat brim would be a style change requiring F, W and the brim radii to be regraded.",
+  "RESOLVED - brim seam position: Rulebook 2 put the brim seams at CF/CB; Rulebooks 1 and 3 on the side seams. Side seams adopted: all seams of both shells stack at two points, CB stays seam-free for the turning gap and its closure, and the topstitch start/overlap hides at a seam.",
+  "RESOLVED - bag-out SA trim: Rulebooks 2 and 3 graded to 0.5 cm, Rulebook 1 to 0.7 cm. 0.7 adopted by geometry: the 0.6 cm topstitch must lie INSIDE the trimmed allowance to catch and flatten it (0.6 > 0.5 would leave the allowance floating and the edge free to roll). Rule: SA_trim = H + 0.1; change the two numbers together.",
+  "RESOLVED - turning gap: 10 / 8 / 7 cm across the rulebooks; 8 +/-1 cm adopted (median; upper end of the 6-8 cm default for 2 x 280 gsm bulk). Two crowns must pass through it; if the first-bundle turn distorts the edge the factory may open to 10 cm as a recorded deviation - the topstitch row still closes it.",
+  "RESOLVED - stitch-in-ditch: full round (Rulebooks 1 and 2) instead of four 1.5 cm tacks (Rulebook 3). A full round through stacked seams is invisible on both faces, stops the crowns ballooning apart when reversed, keeps the brim layers from shifting and fixes A on both faces; tacks would leave about 55 cm of seam free to separate.",
+  "RESOLVED - tip seam edge-stitch: Rulebook 1's 0.2 cm edge-stitch dropped (Rulebooks 2 and 3). The brief specifies the brim row as the only topstitch; the tip SA is enclosed between the nested crowns and needs no securing.",
+  "RESOLVED - seaming thread: Tex 35 / 30 / 27 across the rulebooks -> Tex 30 (Tkt 100), the median and the standard size for 280 gsm twill; it also keeps bulk down in the bagged edge. Tex 40 topstitch and Nm 80 / 90 needles were agreed by all three.",
+  "RESOLVED - thread-colour rule through both shells: Rulebook 1's general rule (needle DTM face up, bobbin DTM face down) and Rulebooks 2 and 3's fixed rule (khaki face always up, khaki needle / black bobbin) are the same rule; the fixed form is specified so the line never changes set-up between colourways. It also applies to the bag-out seam - Rulebook 2's all-black bag-out was rejected because black stitches would show along the khaki edge where the seam rolls exactly to the edge.",
+  "RESOLVED - care label: Rulebook 2's loop caught in the band/brim seam was rejected (on a reversible hat that seam is enclosed, carries the ditch row and would put the loop against the scalp at the seam when worn the other way). Adopted: a folded loop label sewn across its top on the band below the brand label (Rulebooks 1 and 3). Gap 0.5 cm (not 1.0) and label height 3.0 cm are fixed by the size-S band height: 1.5 + 2.0 + 0.5 + 3.0 = 7.0 cm leaves 1.5 cm above the band/brim seam at B = 8.5.",
+  "RESOLVED - hangtag: a tag gun through the ditch seam (Rulebook 1) or a pin through the brim SA zone (Rulebook 3) both put a hole in a product with two outer faces; Rulebook 2's string through the brand label was adopted, with the brim-edge pin kept only as a fallback inside the 0.6 cm topstitch zone.",
+  "RESOLVED - tolerances: D +/-0.3 (not 0.5) because D and C are one measurement through pi and C is +/-1.0 (1.0/pi = 0.32); a +/-0.5 diameter would allow +/-1.6 on the tip circumference and let sizes overlap. B +/-0.5 (not 0.3) as a sewn height; G = B + E therefore +/-0.7 (not 0.5) so the component tolerances can coexist; C +/-1.0 (not 0.8) on the no-overlap logic; roundness = two D readings within 0.3 cm.",
+  "RESOLVED - consumption: 0.18 (Rulebook 1) vs 0.17 (Rulebooks 2 and 3). 0.17 m per hat per colour adopted for planning, 0.19 for buying: Rulebook 1's figure came from the larger flat-annulus brim pieces and 70% efficiency; the cone brim cuts 1,679 cm2 per shell and 72% efficiency (median of 70 / 72 / 75) on 147 cm usable width (145 rejected - 1.5 cm selvedge per side is typical) gives 16.7 cm.",
+  "RESOLVED - label sequence: labels are sewn on the FLAT band panel before the side seams (Rulebook 1) rather than after the tip set (Rulebooks 2 and 3): flat work is faster and more accurate on a label machine, and the position is simply 2.5 cm from the cut edge (J + SA). The CW bundle split therefore happens at step 3, with the code already on the bundle ticket from cutting.",
+  "RESOLVED - grain and twill handling: band warp runs along the circumference (Rulebook 2) for stability of A, not vertical (Rulebook 3); tip grain CF-CB; brim grain on the centre radius. Rulebook 3's 'mirrored' brim halves were dropped - a symmetric piece cannot be mirrored without turning the twill face down; all pieces are cut face up, 180 deg rotation allowed for marker efficiency after a shading check on the first lay.",
+  "RESOLVED - band panel edges: drafted as concentric arcs with R_dev = B*A/(A - C) approx 212 cm (sagitta approx 0.5 cm over 29.5 cm, Rulebook 1) rather than a straight trapezoid (Rulebooks 2 and 3); the straight draft is an acceptable approximation only if the 0.5 cm is eased evenly, so the arc version is the master pattern.",
+  "RESOLVED - interfacing option: if a stiffer brim is ever wanted, fuse BOTH brim sets identically (Rulebook 1), never one shell (Rulebooks 2 and 3): a one-sided fusible shrinks differently from the bare ply and curls the edge toward the unfused face after washing, and the two faces would have unequal hand. Base spec stays unfused; extra topstitch rows are a brief revision, not a factory option.",
+  "RESOLVED - process constants: relaxation 24 h (not 12); lay <=50 plies; bag-out outer edge NOT notched (convex R 17.3 with 0.7 SA lies flat - the SA edge is only 3.8 cm longer than the seam line), snips at the gap ends only; brim inner-arc SA clipped every 2.5 cm to 2 mm from the seam line BEFORE joining (the cut edge is 2.7 cm per half shorter than its seam line).",
+  "RESOLVED - care instructions and packing: 'do not tumble dry' and 'iron medium' adopted (two rulebooks each) - the two dye lots shrink differently under tumble heat and would twist the bagged edge, and cotton twill takes a 2-dot iron. Polybag 25 x 30, 10 per inner, 40 per carton, brim folded up at the band/brim seam only, no silica gel (domestic), no metal anywhere.",
+  "RESOLVED - POM lettering and seam class: A-F as in Rulebooks 1 and 3; G = total height, H = topstitch offset, J = label position (Rulebook 3 order); K = turning gap (Rulebook 2's in-process POM) and W = full width on head form (Rulebook 2) added as derived checks. Seam-class citation corrected to ISO 4916 1.06.02 (SSe, runstitch-and-topstitch) after checking the A&E chart - Rulebook 1's 1.01.03 and Rulebook 2's 1.06.03 (SSae, facing edgestitch) describe other constructions.",
+  "Reversible = no wrong side anywhere: every seam allowance is trapped between the shells; no overlock; no topstitch on internal seams; side seams pressed open; labels stitched to one shell before nesting; anything stitched through both shells after turning uses the fixed khaki-up / khaki-needle / black-bobbin rule with balanced tension - a bobbin-colour dot on either face is the most visible defect on this product and is the first thing the PP sample is checked for.",
+  "Pattern-room checks before grading: pi*D (56.5) = 2 band top edges (2 x 28.25); 2 band bottom edges (2 x 29.5 = 59.0) = 2 brim inner arcs = A; 2 brim outer arcs (2 x 47.2) = F; the tip seam has zero ease, so any tip puckering is a cutting or notch error, not a pattern one. Editing A regrades everything; editing the 2.5 cm taper changes only C and D; editing the 30 deg drop changes only the brim radii, F and W; editing E changes F, G and W.",
+  "Colour risk is asymmetric: black is in permanent face-to-face contact with khaki and the two are washed together. Wet-rub and wash-staining of the black lot onto khaki is the critical fabric test; a lot that fails is rejected before cutting because it cannot be corrected after assembly. The care label's dark-first / inside-out note covers the consumer side.",
+  "Marker / IE: one marker file, identical ply counts on both colour lays - a 3% shortfall in either colour stops the whole run because every hat needs one shell of each. A shade difference between two khaki rolls only differs hat-to-hat (never within a hat), so shade groups are handled by lay, not by pairing; both faces of any hat come from approved lots.",
+  "Commercial simplification for a first run: order as ONE style with two colourway codes so fabric, cutting and sewing are pooled; only the label PO, hangtag print and packing split. If the brand later wants a single SKU, put the labels on the black shell for all hats (or a two-faced loop label caught in the brim edge seam at CB) and pack 50/50 either way out - the hat itself does not change."
+ ]
+}

@@ -1,0 +1,14 @@
+# build artefacts and local data
+app/data/
+app/.next/
+app/node_modules/
+app/.env.local
+app/.env*.local
+infra/dist/
+infra/release.zip
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.backup
+infra/terraform/.terraform.lock.hcl
+*.log
+anthropic_api_key.txt
