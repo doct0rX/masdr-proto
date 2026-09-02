@@ -6,8 +6,8 @@ REGION="${AWS_REGION:-eu-west-1}"
 cd "$(dirname "$0")/../terraform"
 BUCKET="$(terraform output -raw bucket)"
 INSTANCE="$(terraform output -raw instance_id)"
-aws --profile "$PROFILE" --region "$REGION" s3 cp ../release.zip "s3://$BUCKET/releases/latest.zip"
-aws --profile "$PROFILE" --region "$REGION" s3 cp ../release.zip "s3://$BUCKET/releases/$(date +%Y%m%d%H%M%S).zip"
+AWS_MAX_ATTEMPTS=10 AWS_RETRY_MODE=adaptive aws --profile "$PROFILE" --region "$REGION" s3 cp ../release.zip "s3://$BUCKET/releases/latest.zip" --only-show-errors --cli-read-timeout 300 --cli-connect-timeout 60
+aws --profile "$PROFILE" --region "$REGION" s3 cp "s3://$BUCKET/releases/latest.zip" "s3://$BUCKET/releases/$(date +%Y%m%d%H%M%S).zip" --only-show-errors
 CMD_ID=$(aws --profile "$PROFILE" --region "$REGION" ssm send-command \
   --instance-ids "$INSTANCE" --document-name AWS-RunShellScript \
   --comment "masdr deploy" --parameters 'commands=["/usr/local/bin/masdr-deploy"]' \

@@ -143,3 +143,8 @@ runcmd:
   - /usr/local/bin/masdr-deploy || echo "no release yet; run masdr-deploy after uploading releases/latest.zip"
   - systemctl enable masdr
   - chown -R masdr:masdr /var/lib/masdr
+  # The Caddy package does not always create its service user on first boot; make sure it exists, then restart.
+  - systemd-sysusers || true
+  - id caddy >/dev/null 2>&1 || useradd --system --home /var/lib/caddy --shell /usr/sbin/nologin --create-home caddy
+  - mkdir -p /var/lib/caddy /etc/ssl/caddy && chown -R caddy:caddy /var/lib/caddy /etc/ssl/caddy
+  - sleep 3 && systemctl restart caddy
